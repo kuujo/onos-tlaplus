@@ -40,69 +40,67 @@ messageVars == <<messages, messageCount>>
 
 ----
 
-vars == <<serverVars, clientVars, messageVars>>
-
-----
-
+\* The invariant checks that no client can hold more than one lock at a time
 TypeInvariant ==
     /\ \A c \in DOMAIN clients : Cardinality(clients[c].locks) \in 0..1
+    /\ Cardinality({c \in DOMAIN clients : Cardinality(clients[c].locks) > 0}) \in 0..1
 
 ----
 
 Pop(q) == SubSeq(q, 2, Len(q))
 
-Send(m) ==
-    /\ messages' = Append(messages, m)
+Send(m, c) ==
+    /\ messages' = [messages EXCEPT ![c] = Append(messages[c], m)]
     /\ messageCount' = messageCount + 1
 
-Accept(m) ==
-    /\ messages' = Pop(messages)
+Accept(m, c) ==
+    /\ messages' = [messages EXCEPT ![c] = Pop(messages[c])]
     /\ messageCount' = messageCount + 1
 
-Reply(m) ==
-    /\ messages' = Pop(messages) \o <<m>>
+Reply(m, c) ==
+    /\ messages' = [messages EXCEPT ![c] = Append(Pop(messages[c]), m)]
     /\ messageCount' = messageCount + 1
 
 ----
 
-HandleLockRequest(message) ==
+HandleLockRequest(m, c) ==
     \/ /\ lock = Nil
-       /\ lock' = message
+       /\ lock' = m @@ ("client" :> c)
        /\ id' = id + 1
-       /\ Reply([type |-> LockResponse, client |-> message.client, acquired |-> TRUE, id |-> id])
+       /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id], c)
        /\ UNCHANGED <<queue, clientVars>>
     \/ /\ lock /= Nil
-       /\ queue' = Append(queue, message)
-       /\ Accept(message)
+       /\ queue' = Append(queue, m @@ ("client" :> c))
+       /\ Accept(m, c)
        /\ UNCHANGED <<lock, id, clientVars>>
 
-HandleTryLockRequest(message) ==
+HandleTryLockRequest(m, c) ==
     \/ /\ lock = Nil
-       /\ lock' = message
+       /\ lock' = m @@ ("client" :> c)
        /\ id' = id + 1
-       /\ Reply([type |-> LockResponse, client |-> message.client, acquired |-> TRUE, id |-> id])
+       /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id], c)
        /\ UNCHANGED <<queue, clientVars>>
     \/ /\ lock /= Nil
-       /\ Reply([type |-> LockResponse, client |-> message.client, acquired |-> FALSE])
+       /\ Reply([type |-> LockResponse, acquired |-> FALSE], c)
        /\ UNCHANGED <<clientVars, serverVars>>
 
-HandleUnlockRequest(message) ==
+HandleUnlockRequest(m, c) ==
     \/ /\ lock = Nil
-       /\ Accept(message)
+       /\ Accept(m, c)
        /\ UNCHANGED <<clientVars, serverVars>>
     \/ /\ lock /= Nil
-       /\ lock.client = message.client
-       /\ lock.id = message.id
+       /\ lock.client = c
+       /\ lock.id = m.id
        /\ \/ /\ Len(queue) > 0
-             /\ LET m == Head(queue)
+             /\ LET next == Head(queue)
                 IN
-                    /\ lock' = m
+                    /\ lock' = next
                     /\ id' = id + 1
-                    /\ queue' = Pop(messages)
-                    /\ Reply([type |-> LockResponse, client |-> message.client, acquired |-> TRUE, id |-> id])
+                    /\ queue' = Pop(queue)
+                    /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id], c)
           \/ /\ Len(queue) = 0
              /\ lock' = Nil
-             /\ Accept(message)
+             /\ Accept(m, c)
              /\ UNCHANGED <<queue, id>>
     /\ UNCHANGED <<clientVars>>
 
@@ -115,8 +113,8 @@ ExpireSession(c) ==
            LET q == SelectSeq(queue, IsActive)
            IN
                \/ /\ Len(q) > 0
-                  /\ lock' = Head(q)
-                  /\ queue' = Pop(messages)
+                  /\ lock' = Head(q) @@ ("client" :> c)
+                  /\ queue' = Pop(q)
                \/ /\ Len(queue) = 0
                   /\ lock' = Nil
                   /\ queue' = <<>>
@@ -129,50 +127,50 @@ ExpireSession(c) ==
 
 Lock(c) ==
     /\ clients[c].state = Active
-    /\ Send([type |-> LockRequest, client |-> c, id |-> clients[c].next])
+    /\ Send([type |-> LockRequest, id |-> clients[c].next], c)
     /\ clients' = [clients EXCEPT ![c].next = clients[c].next + 1]
     /\ UNCHANGED <<serverVars>>
 
 TryLock(c) ==
     /\ clients[c].state = Active
-    /\ Send([type |-> TryLockRequest, client |-> c, id |-> clients[c].next])
+    /\ Send([type |-> TryLockRequest, id |-> clients[c].next], c)
     /\ clients' = [clients EXCEPT ![c].next = clients[c].next + 1]
     /\ UNCHANGED <<serverVars>>
 
 Unlock(c) ==
     /\ clients[c].state = Active
     /\ Cardinality(clients[c].locks) > 0
-    /\ Send([type |-> UnlockRequest, client |-> c, id |-> CHOOSE l \in clients[c].locks : TRUE])
+    /\ Send([type |-> UnlockRequest, id |-> CHOOSE l \in clients[c].locks : TRUE], c)
     /\ clients' = [clients EXCEPT ![c].locks = clients[c].locks \ {CHOOSE l \in clients[c].locks : TRUE}]
     /\ UNCHANGED <<serverVars>>
 
-HandleLockResponse(message) ==
-    /\ \/ /\ message.acquired
-          /\ clients' = [clients EXCEPT ![message.client].locks = clients[message.client].locks \cup {message.id}]
+HandleLockResponse(m, c) ==
+    /\ \/ /\ m.acquired
+          /\ clients' = [clients EXCEPT ![c].locks = clients[c].locks \cup {m.id}]
           /\ UNCHANGED <<serverVars>>
-       \/ /\ ~message.acquired
+       \/ /\ ~m.acquired
           /\ UNCHANGED <<clientVars, serverVars>>
-    /\ Accept(message)
+    /\ Accept(m, c)
 
 ----
 
-Receive ==
-    /\ Len(messages) > 0
-    /\ LET message == Head(messages)
+Receive(c) ==
+    /\ Len(messages[c]) > 0
+    /\ LET message == Head(messages[c])
        IN
            \/ /\ message.type = LockRequest
-              /\ HandleLockRequest(message)
+              /\ HandleLockRequest(message, c)
            \/ /\ message.type = LockResponse
-              /\ HandleLockResponse(message)
+              /\ HandleLockResponse(message, c)
            \/ /\ message.type = TryLockRequest
-              /\ HandleTryLockRequest(message)
+              /\ HandleTryLockRequest(message, c)
            \/ /\ message.type = UnlockRequest
-              /\ HandleUnlockRequest(message)
+              /\ HandleUnlockRequest(message, c)
 
 ----
 
 Init ==
-    /\ messages = <<>>
+    /\ messages = [c \in Clients |-> <<>>]
     /\ messageCount = 0
     /\ lock = Nil
     /\ queue = <<>>
@@ -180,14 +178,14 @@ Init ==
     /\ clients = [c \in Clients |-> [state |-> Active, locks |-> {}, next |-> 1]]
 
 Next ==
-    \/ Receive
+    \/ \E c \in DOMAIN clients : Receive(c)
     \/ \E c \in DOMAIN clients : Lock(c)
     \/ \E c \in DOMAIN clients : TryLock(c)
     \/ \E c \in DOMAIN clients : Unlock(c)
 
-Spec == Init /\ [][Next]_vars
+Spec == Init /\ [][Next]_<<serverVars, clientVars, messageVars>>
 
 =============================================================================
 \* Modification History
-\* Last modified Fri Jan 26 18:32:52 PST 2018 by jordanhalterman
+\* Last modified Sat Jan 27 00:49:33 PST 2018 by jordanhalterman
 \* Created Fri Jan 26 13:12:01 PST 2018 by jordanhalterman
