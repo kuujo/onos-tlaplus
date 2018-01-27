@@ -149,9 +149,6 @@ HandleUnlockRequest(m, c) ==
 
 ----
 
-\* Returns whether the client associated with the given message is active
-IsActive(m) == clients'[m.client].state = Active
-
 (*
 Expires a client's session. If the client currently holds the lock, the lock will be
 released and the lock will be granted to another client if possible. Additionally,
@@ -160,21 +157,23 @@ pending lock requests from the client will be removed from the queue.
 ExpireSession(c) ==
     /\ clients[c].state = Active
     /\ clients' = [clients EXCEPT ![c].state = Inactive]
-    /\ IF lock # Nil /\ lock.client = c THEN
-           LET q == SelectSeq(queue, IsActive)
-           IN
-               \/ /\ Len(q) > 0
-                  /\ lock' = Head(q)
-                  /\ id' = id + 1
-                  /\ queue' = Pop(q)
-                  /\ Send([type |-> LockResponse, acquired |-> TRUE, id |-> id'], lock'.client)
-               \/ /\ Len(queue) = 0
-                  /\ lock' = Nil
-                  /\ queue' = <<>>
-                  /\ UNCHANGED <<id, messageVars>>
-       ELSE
-           /\ queue' = SelectSeq(queue, IsActive)
-           /\ UNCHANGED <<lock, id, messageVars>>
+    /\ LET isActive(m) == clients'[m.client].state = Active
+       IN
+           IF lock # Nil /\ lock.client = c THEN
+               LET q == SelectSeq(queue, isActive)
+               IN
+                   \/ /\ Len(q) > 0
+                      /\ lock' = Head(q)
+                      /\ id' = id + 1
+                      /\ queue' = Pop(q)
+                      /\ Send([type |-> LockResponse, acquired |-> TRUE, id |-> id'], lock'.client)
+                   \/ /\ Len(queue) = 0
+                      /\ lock' = Nil
+                      /\ queue' = <<>>
+                      /\ UNCHANGED <<id, messageVars>>
+           ELSE
+               /\ queue' = SelectSeq(queue, isActive)
+               /\ UNCHANGED <<lock, id, messageVars>>
 
 ----
 
@@ -264,5 +263,5 @@ Spec == Init /\ [][Next]_<<serverVars, clientVars, messageVars>>
 
 =============================================================================
 \* Modification History
-\* Last modified Sat Jan 27 02:37:15 PST 2018 by jordanhalterman
+\* Last modified Sat Jan 27 02:41:36 PST 2018 by jordanhalterman
 \* Created Fri Jan 26 13:12:01 PST 2018 by jordanhalterman
