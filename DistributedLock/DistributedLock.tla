@@ -43,7 +43,6 @@ messageVars == <<messages, messageCount>>
 \* The invariant checks that no client can hold more than one lock at a time
 TypeInvariant ==
     /\ \A c \in DOMAIN clients : Cardinality(clients[c].locks) \in 0..1
-    /\ Cardinality({c \in DOMAIN clients : Cardinality(clients[c].locks) > 0}) \in 0..1
 
 ----
 
@@ -67,7 +66,7 @@ HandleLockRequest(m, c) ==
     \/ /\ lock = Nil
        /\ lock' = m @@ ("client" :> c)
        /\ id' = id + 1
-       /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id], c)
+       /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id'], c)
        /\ UNCHANGED <<queue, clientVars>>
     \/ /\ lock /= Nil
        /\ queue' = Append(queue, m @@ ("client" :> c))
@@ -78,7 +77,7 @@ HandleTryLockRequest(m, c) ==
     \/ /\ lock = Nil
        /\ lock' = m @@ ("client" :> c)
        /\ id' = id + 1
-       /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id], c)
+       /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id'], c)
        /\ UNCHANGED <<queue, clientVars>>
     \/ /\ lock /= Nil
        /\ Reply([type |-> LockResponse, acquired |-> FALSE], c)
@@ -97,7 +96,7 @@ HandleUnlockRequest(m, c) ==
                     /\ lock' = next
                     /\ id' = id + 1
                     /\ queue' = Pop(queue)
-                    /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id], c)
+                    /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id'], c)
           \/ /\ Len(queue) = 0
              /\ lock' = Nil
              /\ Accept(m, c)
@@ -106,22 +105,27 @@ HandleUnlockRequest(m, c) ==
 
 ----
 
-IsActive(m) == clients[m.client] = Active
+IsActive(m) == clients[m.client].state = Active
 
 ExpireSession(c) ==
+    /\ clients[c].state = Active
     /\ IF lock /= Nil /\ lock.client = c THEN
            LET q == SelectSeq(queue, IsActive)
            IN
                \/ /\ Len(q) > 0
                   /\ lock' = Head(q) @@ ("client" :> c)
+                  /\ id' = id + 1
                   /\ queue' = Pop(q)
+                  /\ Send([type |-> LockResponse, acquired |-> TRUE, id |-> id'], lock'.client)
                \/ /\ Len(queue) = 0
                   /\ lock' = Nil
                   /\ queue' = <<>>
+                  /\ UNCHANGED <<id, messageVars>>
        ELSE
            /\ queue' = SelectSeq(queue, IsActive)
-           /\ UNCHANGED <<lock>>
-    /\ clients' = [clients EXCEPT ![c].state = Inactive]
+           /\ UNCHANGED <<lock, id, messageVars>>
+    /\ clients' = [clients EXCEPT ![c].state = Inactive,
+                                  ![c].locks = {}]
 
 ----
 
@@ -145,10 +149,14 @@ Unlock(c) ==
     /\ UNCHANGED <<serverVars>>
 
 HandleLockResponse(m, c) ==
-    /\ \/ /\ m.acquired
+    /\ \/ /\ clients[c].state = Inactive
+          /\ UNCHANGED <<clientVars, serverVars>>
+       \/ /\ clients[c].state = Active
+          /\ m.acquired
           /\ clients' = [clients EXCEPT ![c].locks = clients[c].locks \cup {m.id}]
           /\ UNCHANGED <<serverVars>>
-       \/ /\ ~m.acquired
+       \/ /\ clients[c].state = Active
+          /\ ~m.acquired
           /\ UNCHANGED <<clientVars, serverVars>>
     /\ Accept(m, c)
 
@@ -174,7 +182,7 @@ Init ==
     /\ messageCount = 0
     /\ lock = Nil
     /\ queue = <<>>
-    /\ id = 1
+    /\ id = 0
     /\ clients = [c \in Clients |-> [state |-> Active, locks |-> {}, next |-> 1]]
 
 Next ==
@@ -182,10 +190,11 @@ Next ==
     \/ \E c \in DOMAIN clients : Lock(c)
     \/ \E c \in DOMAIN clients : TryLock(c)
     \/ \E c \in DOMAIN clients : Unlock(c)
+    \/ \E c \in DOMAIN clients : ExpireSession(c)
 
 Spec == Init /\ [][Next]_<<serverVars, clientVars, messageVars>>
 
 =============================================================================
 \* Modification History
-\* Last modified Sat Jan 27 00:49:33 PST 2018 by jordanhalterman
+\* Last modified Sat Jan 27 01:27:33 PST 2018 by jordanhalterman
 \* Created Fri Jan 26 13:12:01 PST 2018 by jordanhalterman
