@@ -66,31 +66,41 @@ TypeInvariant ==
 \* Returns a sequence with the head removed
 Pop(q) == SubSeq(q, 2, Len(q))
 
-\* Sends a message on the given client's channel
-Send(m, c) ==
+\* Sends a request on the given client's channel
+SendRequest(m, c) ==
     /\ requests' = [requests EXCEPT ![c] = Append(requests[c], m)]
     /\ messageCount' = messageCount + 1
-    /\ UNCHANGED <<responses>>
 
-\* Removes a message from the given client's channel
+\* Sends a response on the given client's channel
+SendResponse(m, c) ==
+    /\ responses' = [requests EXCEPT ![c] = Append(responses[c], m)]
+    /\ messageCount' = messageCount + 1
+
+\* Removes a request from the given client's channel
 AcceptRequest(m, c) ==
     /\ requests' = [requests EXCEPT ![c] = Pop(requests[c])]
     /\ messageCount' = messageCount + 1
-    /\ UNCHANGED <<responses>>
 
-\* Removes a message from the given server's channel
+\* Removes a response from the given client's channel
 AcceptResponse(m, c) ==
     /\ responses' = [responses EXCEPT ![c] = Pop(responses[c])]
     /\ messageCount' = messageCount + 1
-    /\ UNCHANGED <<requests>>
-
-\* Removes the last message from the client's channel and appends a message to the given server's channel
-Reply(m, c) ==
-    /\ requests' = [requests EXCEPT ![c] = Pop(requests[c])]
-    /\ responses' = [responses EXCEPT ![c] = Append(responses[c], m)]
-    /\ messageCount' = messageCount + 1
 
 ----
+
+(****************************************************************************)
+(* This section models a lock state machine. The state machine supports     *)
+(* three types of request:                                                  *)
+(*   * LockRequest attempts to acquire the lock. If the lock is owned by    *)
+(*     another process, the request is enqueued until the lock is released. *)
+(*   * TryLockRequest attempts to acquire the lock and fails if the lock    *)
+(*     is already owned by another process.                                 *)
+(*   * UnlockRequest attempts to release a lock that's owned by a process.  *)
+(*                                                                          *)
+(* Additionally, any process's session can be expired, causing any locks    *)
+(* held by the session                                                      *)
+(* to be released and lock requests enqueued for the session to be removed. *)
+(****************************************************************************)
 
 (*
 Handles a lock request. If the lock is not currently held by another process, the lock is
@@ -98,36 +108,34 @@ granted to the client. If the lock is held by a process, the request is added to
 *)
 HandleLockRequest(m, c) ==
     \/ /\ sessions[c].state # Active
-       /\ AcceptRequest(m, c)
-       /\ UNCHANGED <<clientVars, serverVars>>
+       /\ UNCHANGED <<clientVars, serverVars, responses>>
     \/ /\ sessions[c].state = Active
        /\ lock = Nil
        /\ lock' = m @@ ("client" :> c)
        /\ id' = id + 1
-       /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id'], c)
+       /\ SendResponse([type |-> LockResponse, acquired |-> TRUE, id |-> id'], c)
        /\ UNCHANGED <<queue, sessions, clientVars>>
     \/ /\ sessions[c].state = Active
        /\ lock # Nil
        /\ queue' = Append(queue, m @@ ("client" :> c))
-       /\ AcceptRequest(m, c)
-       /\ UNCHANGED <<lock, id, sessions, clientVars>>
+       /\ UNCHANGED <<lock, id, sessions, clientVars, responses>>
+
 (*
 Handles a tryLock request. If the lock is not currently held by another process, the lock
 is granted to the client. Otherwise, the request is rejected.
 *)
 HandleTryLockRequest(m, c) ==
     \/ /\ sessions[c].state # Active
-       /\ AcceptRequest(m, c)
-       /\ UNCHANGED <<clientVars, serverVars>>
+       /\ UNCHANGED <<clientVars, serverVars, responses>>
     \/ /\ sessions[c].state = Active
        /\ lock = Nil
        /\ lock' = m @@ ("client" :> c)
        /\ id' = id + 1
-       /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id'], c)
+       /\ SendResponse([type |-> LockResponse, acquired |-> TRUE, id |-> id'], c)
        /\ UNCHANGED <<queue, sessions, clientVars>>
     \/ /\ sessions[c].state = Active
        /\ lock # Nil
-       /\ Reply([type |-> LockResponse, acquired |-> FALSE], c)
+       /\ SendResponse([type |-> LockResponse, acquired |-> FALSE], c)
        /\ UNCHANGED <<clientVars, serverVars>>
 
 (*
@@ -137,12 +145,10 @@ be removed from the queue and the lock will be granted to the requesting client.
 *)
 HandleUnlockRequest(m, c) ==
     \/ /\ sessions[c].state # Active
-       /\ AcceptRequest(m, c)
-       /\ UNCHANGED <<clientVars, serverVars>>
+       /\ UNCHANGED <<clientVars, serverVars, responses>>
     \/ /\ sessions[c].state = Active
        /\ lock = Nil
-       /\ AcceptRequest(m, c)
-       /\ UNCHANGED <<clientVars, serverVars>>
+       /\ UNCHANGED <<clientVars, serverVars, responses>>
     \/ /\ sessions[c].state = Active
        /\ lock # Nil
        /\ lock.client = c
@@ -153,15 +159,12 @@ HandleUnlockRequest(m, c) ==
                     /\ lock' = next
                     /\ id' = id + 1
                     /\ queue' = Pop(queue)
-                    /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id'], next.client)
+                    /\ SendResponse([type |-> LockResponse, acquired |-> TRUE, id |-> id'], next.client)
                     /\ UNCHANGED <<sessions>>
           \/ /\ Len(queue) = 0
              /\ lock' = Nil
-             /\ AcceptRequest(m, c)
-             /\ UNCHANGED <<queue, id, sessions>>
+             /\ UNCHANGED <<queue, id, sessions, responses>>
     /\ UNCHANGED <<clientVars>>
-
-----
 
 (*
 Expires a client's session. If the client currently holds the lock, the lock will be
@@ -180,7 +183,8 @@ ExpireSession(c) ==
                       /\ lock' = Head(q)
                       /\ id' = id + 1
                       /\ queue' = Pop(q)
-                      /\ Send([type |-> LockResponse, acquired |-> TRUE, id |-> id'], lock'.client)
+                      /\ SendResponse([type |-> LockResponse, acquired |-> TRUE, id |-> id'], lock'.client)
+                      /\ UNCHANGED <<requests>>
                    \/ /\ Len(queue) = 0
                       /\ lock' = Nil
                       /\ queue' = <<>>
@@ -189,6 +193,66 @@ ExpireSession(c) ==
                /\ queue' = SelectSeq(queue, isActive)
                /\ UNCHANGED <<lock, id, messageVars>>
     /\ UNCHANGED <<clientVars>>
+
+----
+
+(***************************************************************************)
+(* This section models a lock client.  A client can interact with a lock   *)
+(* state machine using three types of requests:                            *)
+(*   * Lock attempts to acquire a lock and blocks until successful or      *)
+(*     the session expires                                                 *)
+(*   * TryLock attempts to acquire a lock, failing if the lock is owned    *)
+(*     by another process                                                  *)
+(*   * Unlock attempts to release a lock owned by the process              *)
+(*                                                                         *)
+(* Additionally, a client can assume its session has expired either before *)
+(* or after it actually has.  This models the possibility that a client    *)
+(* believes its session has expired when it hasn't or that the state       *)
+(* machine can expire a client's session without the client knowing.       *)
+(***************************************************************************)
+
+(*
+Sends a lock request to the cluster with a unique ID for the client.
+*)
+Lock(c) ==
+    /\ clients[c].state = Active
+    /\ SendRequest([type |-> LockRequest, id |-> clients[c].next], c)
+    /\ clients' = [clients EXCEPT ![c].next = clients[c].next + 1]
+    /\ UNCHANGED <<serverVars, responses>>
+
+(*
+Sends a try lock request to the cluster with a unique ID for the client.
+*)
+TryLock(c) ==
+    /\ clients[c].state = Active
+    /\ SendRequest([type |-> TryLockRequest, id |-> clients[c].next], c)
+    /\ clients' = [clients EXCEPT ![c].next = clients[c].next + 1]
+    /\ UNCHANGED <<serverVars, responses>>
+
+(*
+Sends an unlock request to the cluster if the client is active and current holds a lock.
+*)
+Unlock(c) ==
+    /\ clients[c].state = Active
+    /\ Cardinality(clients[c].locks) > 0
+    /\ SendRequest([type |-> UnlockRequest, id |-> CHOOSE l \in clients[c].locks : TRUE], c)
+    /\ clients' = [clients EXCEPT ![c].locks = clients[c].locks \ {CHOOSE l \in clients[c].locks : TRUE}]
+    /\ UNCHANGED <<serverVars, responses>>
+
+(*
+Handles a lock response from the cluster. If the client's session is expired, the response
+is ignored. If the lock was acquired successfully, it's added to the client's lock set.
+*)
+HandleLockResponse(m, c) ==
+    /\ \/ /\ clients[c].state = Inactive
+          /\ UNCHANGED <<clientVars, serverVars, requests>>
+       \/ /\ clients[c].state = Active
+          /\ m.acquired
+          /\ clients' = [clients EXCEPT ![c].locks = clients[c].locks \cup {m.id}]
+          /\ UNCHANGED <<serverVars, requests>>
+       \/ /\ clients[c].state = Active
+          /\ ~m.acquired
+          /\ UNCHANGED <<clientVars, serverVars, requests>>
 
 (*
 Closes a client's expired session. This is performed in a separate step to model the
@@ -206,69 +270,24 @@ CloseSession(c) ==
 ----
 
 (*
-Sends a lock request to the cluster with a unique ID for the client.
+Receives a request 'm' from the client 'c' to the cluster.
 *)
-Lock(c) ==
-    /\ clients[c].state = Active
-    /\ Send([type |-> LockRequest, id |-> clients[c].next], c)
-    /\ clients' = [clients EXCEPT ![c].next = clients[c].next + 1]
-    /\ UNCHANGED <<serverVars>>
+ReceiveRequest(m, c) ==
+    /\ \/ /\ m.type = LockRequest
+          /\ HandleLockRequest(m, c)
+       \/ /\ m.type = TryLockRequest
+          /\ HandleTryLockRequest(m, c)
+       \/ /\ m.type = UnlockRequest
+          /\ HandleUnlockRequest(m, c)
+    /\ AcceptRequest(m, c)
 
 (*
-Sends a try lock request to the cluster with a unique ID for the client.
+Receives a response 'm' from the cluster to the client 'c'.
 *)
-TryLock(c) ==
-    /\ clients[c].state = Active
-    /\ Send([type |-> TryLockRequest, id |-> clients[c].next], c)
-    /\ clients' = [clients EXCEPT ![c].next = clients[c].next + 1]
-    /\ UNCHANGED <<serverVars>>
-
-(*
-Sends an unlock request to the cluster if the client is active and current holds a lock.
-*)
-Unlock(c) ==
-    /\ clients[c].state = Active
-    /\ Cardinality(clients[c].locks) > 0
-    /\ Send([type |-> UnlockRequest, id |-> CHOOSE l \in clients[c].locks : TRUE], c)
-    /\ clients' = [clients EXCEPT ![c].locks = clients[c].locks \ {CHOOSE l \in clients[c].locks : TRUE}]
-    /\ UNCHANGED <<serverVars>>
-
-(*
-Handles a lock response from the cluster. If the client's session is expired, the response
-is ignored. If the lock was acquired successfully, it's added to the client's lock set.
-*)
-HandleLockResponse(m, c) ==
-    /\ \/ /\ clients[c].state = Inactive
-          /\ UNCHANGED <<clientVars, serverVars>>
-       \/ /\ clients[c].state = Active
-          /\ m.acquired
-          /\ clients' = [clients EXCEPT ![c].locks = clients[c].locks \cup {m.id}]
-          /\ UNCHANGED <<serverVars>>
-       \/ /\ clients[c].state = Active
-          /\ ~m.acquired
-          /\ UNCHANGED <<clientVars, serverVars>>
+ReceiveResponse(m, c) ==
+    /\ \/ /\ m.type = LockResponse
+          /\ HandleLockResponse(m, c)
     /\ AcceptResponse(m, c)
-
-----
-
-(*
-Receives a message from/to the given client from the head of the client's message queue.
-*)
-Receive(c) ==
-    \/ /\ Len(requests[c]) > 0
-       /\ LET message == Head(requests[c])
-          IN
-              \/ /\ message.type = LockRequest
-                 /\ HandleLockRequest(message, c)
-              \/ /\ message.type = TryLockRequest
-                 /\ HandleTryLockRequest(message, c)
-              \/ /\ message.type = UnlockRequest
-                 /\ HandleUnlockRequest(message, c)
-    \/ /\ Len(responses[c]) > 0
-       /\ LET message == Head(responses[c])
-          IN
-              \/ /\ message.type = LockResponse
-                 /\ HandleLockResponse(message, c)
 
 ----
 
@@ -285,7 +304,8 @@ Init ==
 
 \* Next state predicate
 Next ==
-    \/ \E c \in DOMAIN clients : Receive(c)
+    \/ \E c \in DOMAIN clients : \E i \in DOMAIN requests[c] : ReceiveRequest(requests[c][i], c)
+    \/ \E c \in DOMAIN clients : \E i \in DOMAIN responses[c] : ReceiveResponse(responses[c][i], c)
     \/ \E c \in DOMAIN clients : Lock(c)
     \/ \E c \in DOMAIN clients : TryLock(c)
     \/ \E c \in DOMAIN clients : Unlock(c)
@@ -297,5 +317,5 @@ Spec == Init /\ [][Next]_<<serverVars, clientVars, messageVars>>
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Jan 28 10:20:37 PST 2018 by jordanhalterman
+\* Last modified Sun Jan 28 12:14:41 PST 2018 by jordanhalterman
 \* Created Fri Jan 26 13:12:01 PST 2018 by jordanhalterman
