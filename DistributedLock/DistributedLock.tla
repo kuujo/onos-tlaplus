@@ -135,6 +135,12 @@ HandleTryLockRequest(m, c) ==
        /\ UNCHANGED <<queue, sessions, clientVars>>
     \/ /\ sessions[c].state = Active
        /\ lock # Nil
+       /\ m.timeout = 1
+       /\ queue' = Append(queue, m @@ ("client" :> c))
+       /\ UNCHANGED <<clientVars, lock, id, sessions, responses>>
+    \/ /\ sessions[c].state = Active
+       /\ lock # Nil
+       /\ m.timeout = 0
        /\ SendResponse([type |-> LockResponse, acquired |-> FALSE], c)
        /\ UNCHANGED <<clientVars, serverVars>>
 
@@ -165,6 +171,19 @@ HandleUnlockRequest(m, c) ==
              /\ lock' = Nil
              /\ UNCHANGED <<queue, id, sessions, responses>>
     /\ UNCHANGED <<clientVars>>
+
+(*
+Times out a pending TryLockRequest. When the request is timed out, the request will
+be removed from the queue and a response will be sent to the client notifying it of
+the failure.
+*)
+TimeoutTryLock(c) ==
+    /\ \E i \in DOMAIN queue : queue[i].client = c /\ queue[i].type = TryLockRequest
+    /\ LET i == CHOOSE i \in DOMAIN queue : queue[i].client = c /\ queue[i].type = TryLockRequest condition(m) == m # queue[i]
+       IN
+           /\ SendResponse([type |-> LockResponse, acquired |-> FALSE], c)
+           /\ queue' = SelectSeq(queue, condition)
+           /\ UNCHANGED <<clientVars, lock, id, sessions, requests>>
 
 (*
 Expires a client's session. If the client currently holds the lock, the lock will be
@@ -225,7 +244,15 @@ Sends a try lock request to the cluster with a unique ID for the client.
 *)
 TryLock(c) ==
     /\ clients[c].state = Active
-    /\ SendRequest([type |-> TryLockRequest, id |-> clients[c].next], c)
+    /\ SendRequest([type |-> TryLockRequest, id |-> clients[c].next, timeout |-> 0], c)
+    /\ clients' = [clients EXCEPT ![c].next = clients[c].next + 1]
+    /\ UNCHANGED <<serverVars, responses>>
+(*
+Sends a try lock request to the cluster with a timeout and a unique ID for the client.
+*)
+TryLockWithTimeout(c) ==
+    /\ clients[c].state = Active
+    /\ SendRequest([type |-> TryLockRequest, id |-> clients[c].next, timeout |-> 1], c)
     /\ clients' = [clients EXCEPT ![c].next = clients[c].next + 1]
     /\ UNCHANGED <<serverVars, responses>>
 
@@ -308,7 +335,9 @@ Next ==
     \/ \E c \in DOMAIN clients : \E i \in DOMAIN responses[c] : ReceiveResponse(responses[c][i], c)
     \/ \E c \in DOMAIN clients : Lock(c)
     \/ \E c \in DOMAIN clients : TryLock(c)
+    \/ \E c \in DOMAIN clients : TryLockWithTimeout(c)
     \/ \E c \in DOMAIN clients : Unlock(c)
+    \/ \E c \in DOMAIN clients : TimeoutTryLock(c)
     \/ \E c \in DOMAIN clients : ExpireSession(c)
     \/ \E c \in DOMAIN clients : CloseSession(c)
 
@@ -317,5 +346,5 @@ Spec == Init /\ [][Next]_<<serverVars, clientVars, messageVars>>
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Jan 28 12:14:41 PST 2018 by jordanhalterman
+\* Last modified Sun Jan 28 14:20:59 PST 2018 by jordanhalterman
 \* Created Fri Jan 26 13:12:01 PST 2018 by jordanhalterman
