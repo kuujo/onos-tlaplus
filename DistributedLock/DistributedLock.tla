@@ -33,13 +33,16 @@ VARIABLE clients
 
 clientVars == <<clients>>
 
-\* Client messages
-VARIABLE messages
+\* Client requests
+VARIABLE requests
+
+\* Server responses
+VARIABLE responses
 
 \* Variable to track the total number of messages sent for use in state constraints when model checking
 VARIABLE messageCount
 
-messageVars == <<messages, messageCount>>
+messageVars == <<requests, responses, messageCount>>
 
 ----
 
@@ -65,17 +68,26 @@ Pop(q) == SubSeq(q, 2, Len(q))
 
 \* Sends a message on the given client's channel
 Send(m, c) ==
-    /\ messages' = [messages EXCEPT ![c] = Append(messages[c], m)]
+    /\ requests' = [requests EXCEPT ![c] = Append(requests[c], m)]
     /\ messageCount' = messageCount + 1
+    /\ UNCHANGED <<responses>>
 
 \* Removes a message from the given client's channel
-Accept(m, c) ==
-    /\ messages' = [messages EXCEPT ![c] = Pop(messages[c])]
+AcceptRequest(m, c) ==
+    /\ requests' = [requests EXCEPT ![c] = Pop(requests[c])]
     /\ messageCount' = messageCount + 1
+    /\ UNCHANGED <<responses>>
 
-\* Removes the last message and appends a message to the given client's channel
+\* Removes a message from the given server's channel
+AcceptResponse(m, c) ==
+    /\ responses' = [responses EXCEPT ![c] = Pop(responses[c])]
+    /\ messageCount' = messageCount + 1
+    /\ UNCHANGED <<requests>>
+
+\* Removes the last message from the client's channel and appends a message to the given server's channel
 Reply(m, c) ==
-    /\ messages' = [messages EXCEPT ![c] = Append(Pop(messages[c]), m)]
+    /\ requests' = [requests EXCEPT ![c] = Pop(requests[c])]
+    /\ responses' = [responses EXCEPT ![c] = Append(responses[c], m)]
     /\ messageCount' = messageCount + 1
 
 ----
@@ -86,7 +98,7 @@ granted to the client. If the lock is held by a process, the request is added to
 *)
 HandleLockRequest(m, c) ==
     \/ /\ sessions[c].state # Active
-       /\ Accept(m, c)
+       /\ AcceptRequest(m, c)
        /\ UNCHANGED <<clientVars, serverVars>>
     \/ /\ sessions[c].state = Active
        /\ lock = Nil
@@ -97,7 +109,7 @@ HandleLockRequest(m, c) ==
     \/ /\ sessions[c].state = Active
        /\ lock # Nil
        /\ queue' = Append(queue, m @@ ("client" :> c))
-       /\ Accept(m, c)
+       /\ AcceptRequest(m, c)
        /\ UNCHANGED <<lock, id, sessions, clientVars>>
 (*
 Handles a tryLock request. If the lock is not currently held by another process, the lock
@@ -105,7 +117,7 @@ is granted to the client. Otherwise, the request is rejected.
 *)
 HandleTryLockRequest(m, c) ==
     \/ /\ sessions[c].state # Active
-       /\ Accept(m, c)
+       /\ AcceptRequest(m, c)
        /\ UNCHANGED <<clientVars, serverVars>>
     \/ /\ sessions[c].state = Active
        /\ lock = Nil
@@ -125,11 +137,11 @@ be removed from the queue and the lock will be granted to the requesting client.
 *)
 HandleUnlockRequest(m, c) ==
     \/ /\ sessions[c].state # Active
-       /\ Accept(m, c)
+       /\ AcceptRequest(m, c)
        /\ UNCHANGED <<clientVars, serverVars>>
     \/ /\ sessions[c].state = Active
        /\ lock = Nil
-       /\ Accept(m, c)
+       /\ AcceptRequest(m, c)
        /\ UNCHANGED <<clientVars, serverVars>>
     \/ /\ sessions[c].state = Active
        /\ lock # Nil
@@ -145,7 +157,7 @@ HandleUnlockRequest(m, c) ==
                     /\ UNCHANGED <<sessions>>
           \/ /\ Len(queue) = 0
              /\ lock' = Nil
-             /\ Accept(m, c)
+             /\ AcceptRequest(m, c)
              /\ UNCHANGED <<queue, id, sessions>>
     /\ UNCHANGED <<clientVars>>
 
@@ -235,7 +247,7 @@ HandleLockResponse(m, c) ==
        \/ /\ clients[c].state = Active
           /\ ~m.acquired
           /\ UNCHANGED <<clientVars, serverVars>>
-    /\ Accept(m, c)
+    /\ AcceptResponse(m, c)
 
 ----
 
@@ -243,23 +255,27 @@ HandleLockResponse(m, c) ==
 Receives a message from/to the given client from the head of the client's message queue.
 *)
 Receive(c) ==
-    /\ Len(messages[c]) > 0
-    /\ LET message == Head(messages[c])
-       IN
-           \/ /\ message.type = LockRequest
-              /\ HandleLockRequest(message, c)
-           \/ /\ message.type = LockResponse
-              /\ HandleLockResponse(message, c)
-           \/ /\ message.type = TryLockRequest
-              /\ HandleTryLockRequest(message, c)
-           \/ /\ message.type = UnlockRequest
-              /\ HandleUnlockRequest(message, c)
+    \/ /\ Len(requests[c]) > 0
+       /\ LET message == Head(requests[c])
+          IN
+              \/ /\ message.type = LockRequest
+                 /\ HandleLockRequest(message, c)
+              \/ /\ message.type = TryLockRequest
+                 /\ HandleTryLockRequest(message, c)
+              \/ /\ message.type = UnlockRequest
+                 /\ HandleUnlockRequest(message, c)
+    \/ /\ Len(responses[c]) > 0
+       /\ LET message == Head(responses[c])
+          IN
+              \/ /\ message.type = LockResponse
+                 /\ HandleLockResponse(message, c)
 
 ----
 
 \* Initial state predicate
 Init ==
-    /\ messages = [c \in Clients |-> <<>>]
+    /\ requests = [c \in Clients |-> <<>>]
+    /\ responses = [c \in Clients |-> <<>>]
     /\ messageCount = 0
     /\ lock = Nil
     /\ queue = <<>>
@@ -281,5 +297,5 @@ Spec == Init /\ [][Next]_<<serverVars, clientVars, messageVars>>
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Jan 28 10:10:23 PST 2018 by jordanhalterman
+\* Last modified Sun Jan 28 10:20:37 PST 2018 by jordanhalterman
 \* Created Fri Jan 26 13:12:01 PST 2018 by jordanhalterman
