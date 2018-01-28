@@ -23,7 +23,10 @@ VARIABLE queue
 \* The current lock ID
 VARIABLE id
 
-serverVars == <<lock, id, queue>>
+\* Session states
+VARIABLE sessions
+
+serverVars == <<lock, id, queue, sessions>>
 
 \* Client states
 VARIABLE clients
@@ -33,7 +36,7 @@ clientVars == <<clients>>
 \* Client messages
 VARIABLE messages
 
-\* Variable 
+\* Variable to track the total number of messages sent for use in state constraints when model checking
 VARIABLE messageCount
 
 messageVars == <<messages, messageCount>>
@@ -53,9 +56,7 @@ but lock IDs must be unique and monotonically increasing.
 TypeInvariant ==
     /\ \A c \in DOMAIN clients : Cardinality(clients[c].locks) \in 0..1
     /\ \A c1, c2 \in DOMAIN clients : c1 # c2 => Cardinality(clients[c1].locks \cap clients[c2].locks) = 0
-    /\ \/ /\ lock # Nil
-          /\ clients[lock.client].state = Active
-       \/ lock = Nil
+    /\ lock # Nil => sessions[lock.client].state = Active
 
 ----
 
@@ -84,35 +85,35 @@ Handles a lock request. If the lock is not currently held by another process, th
 granted to the client. If the lock is held by a process, the request is added to a queue.
 *)
 HandleLockRequest(m, c) ==
-    \/ /\ clients[c].state = Inactive
+    \/ /\ sessions[c].state # Active
        /\ Accept(m, c)
        /\ UNCHANGED <<clientVars, serverVars>>
-    \/ /\ clients[c].state = Active
+    \/ /\ sessions[c].state = Active
        /\ lock = Nil
        /\ lock' = m @@ ("client" :> c)
        /\ id' = id + 1
        /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id'], c)
-       /\ UNCHANGED <<queue, clientVars>>
-    \/ /\ clients[c].state = Active
+       /\ UNCHANGED <<queue, sessions, clientVars>>
+    \/ /\ sessions[c].state = Active
        /\ lock # Nil
        /\ queue' = Append(queue, m @@ ("client" :> c))
        /\ Accept(m, c)
-       /\ UNCHANGED <<lock, id, clientVars>>
+       /\ UNCHANGED <<lock, id, sessions, clientVars>>
 (*
 Handles a tryLock request. If the lock is not currently held by another process, the lock
 is granted to the client. Otherwise, the request is rejected.
 *)
 HandleTryLockRequest(m, c) ==
-    \/ /\ clients[c].state = Inactive
+    \/ /\ sessions[c].state # Active
        /\ Accept(m, c)
        /\ UNCHANGED <<clientVars, serverVars>>
-    \/ /\ clients[c].state = Active
+    \/ /\ sessions[c].state = Active
        /\ lock = Nil
        /\ lock' = m @@ ("client" :> c)
        /\ id' = id + 1
        /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id'], c)
-       /\ UNCHANGED <<queue, clientVars>>
-    \/ /\ clients[c].state = Active
+       /\ UNCHANGED <<queue, sessions, clientVars>>
+    \/ /\ sessions[c].state = Active
        /\ lock # Nil
        /\ Reply([type |-> LockResponse, acquired |-> FALSE], c)
        /\ UNCHANGED <<clientVars, serverVars>>
@@ -123,14 +124,14 @@ unlocked. If any client's requests are pending in the queue, the next lock reque
 be removed from the queue and the lock will be granted to the requesting client.
 *)
 HandleUnlockRequest(m, c) ==
-    \/ /\ clients[c].state = Inactive
+    \/ /\ sessions[c].state # Active
        /\ Accept(m, c)
        /\ UNCHANGED <<clientVars, serverVars>>
-    \/ /\ clients[c].state = Active
+    \/ /\ sessions[c].state = Active
        /\ lock = Nil
        /\ Accept(m, c)
        /\ UNCHANGED <<clientVars, serverVars>>
-    \/ /\ clients[c].state = Active
+    \/ /\ sessions[c].state = Active
        /\ lock # Nil
        /\ lock.client = c
        /\ lock.id = m.id
@@ -140,11 +141,12 @@ HandleUnlockRequest(m, c) ==
                     /\ lock' = next
                     /\ id' = id + 1
                     /\ queue' = Pop(queue)
-                    /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id'], c)
+                    /\ Reply([type |-> LockResponse, acquired |-> TRUE, id |-> id'], next.client)
+                    /\ UNCHANGED <<sessions>>
           \/ /\ Len(queue) = 0
              /\ lock' = Nil
              /\ Accept(m, c)
-             /\ UNCHANGED <<queue, id>>
+             /\ UNCHANGED <<queue, id, sessions>>
     /\ UNCHANGED <<clientVars>>
 
 ----
@@ -155,9 +157,9 @@ released and the lock will be granted to another client if possible. Additionall
 pending lock requests from the client will be removed from the queue.
 *)
 ExpireSession(c) ==
-    /\ clients[c].state = Active
-    /\ clients' = [clients EXCEPT ![c].state = Inactive]
-    /\ LET isActive(m) == clients'[m.client].state = Active
+    /\ sessions[c].state = Active
+    /\ sessions' = [sessions EXCEPT ![c].state = Inactive]
+    /\ LET isActive(m) == sessions'[m.client].state = Active
        IN
            IF lock # Nil /\ lock.client = c THEN
                LET q == SelectSeq(queue, isActive)
@@ -174,6 +176,20 @@ ExpireSession(c) ==
            ELSE
                /\ queue' = SelectSeq(queue, isActive)
                /\ UNCHANGED <<lock, id, messageVars>>
+    /\ UNCHANGED <<clientVars>>
+
+(*
+Closes a client's expired session. This is performed in a separate step to model the
+time between the cluster expiring a session and the client being notified. A client
+can close its session either before or after it's expired by the cluster. Once the
+client believes its session has expired, its locks are removed, meaning a client
+can also believe itself to hold a lock after its session has expired in the cluster.
+*)
+CloseSession(c) ==
+    /\ clients[c].state = Active
+    /\ clients' = [clients EXCEPT ![c].state = Inactive,
+                                  ![c].locks = {}]
+    /\ UNCHANGED <<serverVars, messageVars>>
 
 ----
 
@@ -249,6 +265,7 @@ Init ==
     /\ queue = <<>>
     /\ id = 0
     /\ clients = [c \in Clients |-> [state |-> Active, locks |-> {}, next |-> 1]]
+    /\ sessions = [c \in Clients |-> [state |-> Active]]
 
 \* Next state predicate
 Next ==
@@ -257,11 +274,12 @@ Next ==
     \/ \E c \in DOMAIN clients : TryLock(c)
     \/ \E c \in DOMAIN clients : Unlock(c)
     \/ \E c \in DOMAIN clients : ExpireSession(c)
+    \/ \E c \in DOMAIN clients : CloseSession(c)
 
 \* The specification includes the initial state predicate and the next state
 Spec == Init /\ [][Next]_<<serverVars, clientVars, messageVars>>
 
 =============================================================================
 \* Modification History
-\* Last modified Sat Jan 27 02:41:36 PST 2018 by jordanhalterman
+\* Last modified Sun Jan 28 10:10:23 PST 2018 by jordanhalterman
 \* Created Fri Jan 26 13:12:01 PST 2018 by jordanhalterman
