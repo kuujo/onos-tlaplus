@@ -111,13 +111,13 @@ HandleLockRequest(m, c) ==
        /\ UNCHANGED <<clientVars, serverVars, responses>>
     \/ /\ sessions[c].state = Active
        /\ lock = Nil
-       /\ lock' = m @@ ("client" :> c)
+       /\ lock' = m
        /\ id' = id + 1
        /\ SendResponse([type |-> LockResponse, acquired |-> TRUE, id |-> id'], c)
        /\ UNCHANGED <<queue, sessions, clientVars>>
     \/ /\ sessions[c].state = Active
        /\ lock # Nil
-       /\ queue' = Append(queue, m @@ ("client" :> c))
+       /\ queue' = Append(queue, m)
        /\ UNCHANGED <<lock, id, sessions, clientVars, responses>>
 
 (*
@@ -129,14 +129,14 @@ HandleTryLockRequest(m, c) ==
        /\ UNCHANGED <<clientVars, serverVars, responses>>
     \/ /\ sessions[c].state = Active
        /\ lock = Nil
-       /\ lock' = m @@ ("client" :> c)
+       /\ lock' = m
        /\ id' = id + 1
        /\ SendResponse([type |-> LockResponse, acquired |-> TRUE, id |-> id'], c)
        /\ UNCHANGED <<queue, sessions, clientVars>>
     \/ /\ sessions[c].state = Active
        /\ lock # Nil
        /\ m.timeout = 1
-       /\ queue' = Append(queue, m @@ ("client" :> c))
+       /\ queue' = Append(queue, m)
        /\ UNCHANGED <<clientVars, lock, id, sessions, responses>>
     \/ /\ sessions[c].state = Active
        /\ lock # Nil
@@ -166,11 +166,10 @@ HandleUnlockRequest(m, c) ==
                     /\ id' = id + 1
                     /\ queue' = Pop(queue)
                     /\ SendResponse([type |-> LockResponse, acquired |-> TRUE, id |-> id'], next.client)
-                    /\ UNCHANGED <<sessions>>
+                    /\ UNCHANGED <<clientVars, sessions>>
           \/ /\ Len(queue) = 0
              /\ lock' = Nil
-             /\ UNCHANGED <<queue, id, sessions, responses>>
-    /\ UNCHANGED <<clientVars>>
+             /\ UNCHANGED <<clientVars, queue, id, sessions, responses>>
 
 (*
 Times out a pending TryLockRequest. When the request is timed out, the request will
@@ -235,7 +234,7 @@ Sends a lock request to the cluster with a unique ID for the client.
 *)
 Lock(c) ==
     /\ clients[c].state = Active
-    /\ SendRequest([type |-> LockRequest, id |-> clients[c].next], c)
+    /\ SendRequest([type |-> LockRequest, client |-> c, id |-> clients[c].next], c)
     /\ clients' = [clients EXCEPT ![c].next = clients[c].next + 1]
     /\ UNCHANGED <<serverVars, responses>>
 
@@ -244,7 +243,7 @@ Sends a try lock request to the cluster with a unique ID for the client.
 *)
 TryLock(c) ==
     /\ clients[c].state = Active
-    /\ SendRequest([type |-> TryLockRequest, id |-> clients[c].next, timeout |-> 0], c)
+    /\ SendRequest([type |-> TryLockRequest, client |-> c, id |-> clients[c].next, timeout |-> 0], c)
     /\ clients' = [clients EXCEPT ![c].next = clients[c].next + 1]
     /\ UNCHANGED <<serverVars, responses>>
 (*
@@ -252,7 +251,7 @@ Sends a try lock request to the cluster with a timeout and a unique ID for the c
 *)
 TryLockWithTimeout(c) ==
     /\ clients[c].state = Active
-    /\ SendRequest([type |-> TryLockRequest, id |-> clients[c].next, timeout |-> 1], c)
+    /\ SendRequest([type |-> TryLockRequest, client |-> c, id |-> clients[c].next, timeout |-> 1], c)
     /\ clients' = [clients EXCEPT ![c].next = clients[c].next + 1]
     /\ UNCHANGED <<serverVars, responses>>
 
@@ -262,7 +261,7 @@ Sends an unlock request to the cluster if the client is active and current holds
 Unlock(c) ==
     /\ clients[c].state = Active
     /\ Cardinality(clients[c].locks) > 0
-    /\ SendRequest([type |-> UnlockRequest, id |-> CHOOSE l \in clients[c].locks : TRUE], c)
+    /\ SendRequest([type |-> UnlockRequest, client |-> c, id |-> CHOOSE l \in clients[c].locks : TRUE], c)
     /\ clients' = [clients EXCEPT ![c].locks = clients[c].locks \ {CHOOSE l \in clients[c].locks : TRUE}]
     /\ UNCHANGED <<serverVars, responses>>
 
@@ -346,5 +345,5 @@ Spec == Init /\ [][Next]_<<serverVars, clientVars, messageVars>>
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Jan 28 14:20:59 PST 2018 by jordanhalterman
+\* Last modified Sun Jan 28 19:11:36 PST 2018 by jordanhalterman
 \* Created Fri Jan 26 13:12:01 PST 2018 by jordanhalterman
