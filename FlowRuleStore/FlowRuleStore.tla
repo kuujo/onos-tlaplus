@@ -121,10 +121,10 @@ Mastership terms are modelled as a queue of monotonically increasing term/master
 Each node has a separate notification queue, and mastership terms are added to all queues in the same
 order. This models the fact that different nodes can learn of mastership changes at different times,
 but each node sees terms increase with the same master for each term.
-*)
 
-\* One significant difference from the spec and the implementation is that the spec does not use limited
-\* numbers of backup nodes. If a node is a master it considers all other nodes to be backups.
+One significant difference from the spec and the implementation is that the spec does not use limited
+numbers of backup nodes. If a node is a master it considers all other nodes to be backups.
+*)
 
 \* Adds mastership term 't' with master 'n' to the mastership queues for device 'd'
 AddTerm(n, d, t) ==
@@ -295,5 +295,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Jun 20 17:49:54 PDT 2018 by jordanhalterman
+\* Last modified Wed Jun 20 17:51:06 PDT 2018 by jordanhalterman
 \* Created Mon Jun 18 21:52:20 PDT 2018 by jordanhalterman
