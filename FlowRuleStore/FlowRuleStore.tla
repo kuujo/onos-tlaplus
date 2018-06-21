@@ -49,7 +49,7 @@ VARIABLE flows
 
 ----
 
-\* An implementation of lamport clocks for causal ordering of events
+(* An implementation of lamport clocks for causal ordering of events *)
 
 \* Increments the logical clock for the given node
 TickClock(n) == states' = [states EXCEPT ![n].timestamp = states[n].timestamp + 1]
@@ -62,12 +62,13 @@ UpdateClock(n, t) ==
       /\ states' = [states EXCEPT ![n].timestamp = states[n].timestamp + 1]
 
 ----
-
-\* Messages are modelled as queues for consistency with TCP semantics.
-\* Each node has a separate channel for all requests and responses.
-\* The logical clock is managed on each send/receive by attaching a
-\* timestamp to all outgoing messages and updating the node's clock
-\* on receive.
+(*
+Messages are modelled as queues for consistency with TCP semantics.
+Each node has a separate channel for all requests and responses.
+The logical clock is managed on each send/receive by attaching a
+timestamp to all outgoing messages and updating the node's clock
+on receive.
+*)
 
 \* Returns a sequence with the head removed
 Pop(q) == SubSeq(q, 2, Len(q))
@@ -85,7 +86,7 @@ ReceiveMessage(n, m) ==
 
 ----
 
-\* Flow modification operators
+(* This section models flows arbitrarily added to/removed from each node *)
 
 \* Returns the bucket ID for the given flow ID by hashing the flow ID to the number of buckets
 GetBucket(fid) == (fid % NumBuckets) + 1
@@ -95,7 +96,10 @@ GetBucket(fid) == (fid % NumBuckets) + 1
 AddFlow(n, f) ==
    /\ states[n][f.did].master
    /\ TickClock(n)
-   /\ flows' = [flows EXCEPT ![n][f.did][GetBucket(f.fid)] = [term |-> states[n][f.did].term, timestamp |-> clocks'[n], entries |-> flows[n][f.did][GetBucket(f.fid)] \cup {f}]]
+   /\ flows' = [flows EXCEPT ![n][f.did][GetBucket(f.fid)] = [
+                   term      |-> states[n][f.did].term, 
+                   timestamp |-> clocks'[n], 
+                   entries   |-> flows[n][f.did][GetBucket(f.fid)] \cup {f}]]
    /\ UNCHANGED <<messages, states, terms, masterships>>
 
 \* Removes a flow 'f' from node 'n' if it believes itself to be the master
@@ -104,15 +108,20 @@ RemoveFlow(n, f) ==
    /\ states[n][f.did].master
    /\ TickClock(n)
    /\ Cardinality(flows[n][f.did][f.fid % NumBuckets] \cap {f}) = 1
-   /\ flows' = [flows EXCEPT ![n][f.did][GetBucket(f.fid)] = [term |-> states[n][f.did].term, timestamp |-> clocks'[n], entries |-> flows[n][f.did][GetBucket(f.fid)] \ {f}]]
+   /\ flows' = [flows EXCEPT ![n][f.did][GetBucket(f.fid)] = [
+                   term      |-> states[n][f.did].term, 
+                   timestamp |-> clocks'[n], 
+                   entries   |-> flows[n][f.did][GetBucket(f.fid)] \ {f}]]
    /\ UNCHANGED <<messages, states, terms, masterships>>
 
 ----
 
-\* Mastership terms are modelled as a queue of monotonically increasing term/master notifications.
-\* Each node has a separate notification queue, and mastership terms are added to all queues in the same
-\* order. This models the fact that different nodes can learn of mastership changes at different times,
-\* but each node sees terms increase with the same master for each term.
+(*
+Mastership terms are modelled as a queue of monotonically increasing term/master notifications.
+Each node has a separate notification queue, and mastership terms are added to all queues in the same
+order. This models the fact that different nodes can learn of mastership changes at different times,
+but each node sees terms increase with the same master for each term.
+*)
 
 \* One significant difference from the spec and the implementation is that the spec does not use limited
 \* numbers of backup nodes. If a node is a master it considers all other nodes to be backups.
@@ -120,7 +129,8 @@ RemoveFlow(n, f) ==
 \* Adds mastership term 't' with master 'n' to the mastership queues for device 'd'
 AddTerm(n, d, t) ==
    /\ t > terms[d]
-   /\ masterships' = [masterships EXCEPT ![d] = [m \in Node |-> Append(masterships[d][m], [node |-> n, term |-> t])]]
+   /\ masterships' = [masterships EXCEPT ![d] = [m \in Node |->
+                         Append(masterships[d][m], [node |-> n, term |-> t])]]
    /\ terms' = [terms EXCEPT ![d] = t]
    /\ UNCHANGED <<messages, states, backups, flows>>
 
@@ -132,9 +142,11 @@ LearnTerm(n, d, t) ==
 
 ----
 
-\* This section models the replication protocol. The protocol includes a simple backup mechanism
-\* which uses logical clocks to determine when buckets need to be replicated. Additionally,
-\* an anti-entropy protocol is used to detect out-of-date buckets on backup nodes.
+(*
+This section models the replication protocol. The protocol includes a simple backup mechanism
+which uses logical clocks to determine when buckets need to be replicated. Additionally,
+an anti-entropy protocol is used to detect out-of-date buckets on backup nodes.
+*)
 
 \* Sends a backup request for device 'd' bucket 'b' from node 'n' to node 'm' if the bucket
 \* has been updated since the last backup
@@ -143,7 +155,11 @@ Backup(n, d, b, m) ==
    /\ LET bucket == flows[n][d][b]
       IN 
          /\ backups[n][d][b][m] < bucket.timestamp
-         /\ SendMessage(m, [type |-> BackupRequest, did |-> d, bid |-> b, bucket |-> bucket, src |-> n])
+         /\ SendMessage(m, [type   |-> BackupRequest,
+                            did    |-> d,
+                            bid    |-> b,
+                            bucket |-> bucket,
+                            src    |-> n])
    /\ UNCHANGED <<states, terms, masterships, backups, flows>>
 
 \* Handles a backup request 'm' on node 'n'
@@ -157,7 +173,11 @@ HandleBackupRequest(n, m) ==
       /\ flows[n][m.did][m.bid].timestamp < m.bucket.timestamp
    THEN
       /\ flows' = [flows EXCEPT ![n][m.did][m.bid] = m.bucket]
-      /\ SendMessage(m.src, [type |-> BackupResponse, did |-> m.did, bid |-> m.bid, timestamp |-> m.bucket.timestamp, succeeded |-> TRUE])
+      /\ SendMessage(m.src, [type      |-> BackupResponse, 
+                             did       |-> m.did,
+                             bid       |-> m.bid, 
+                             timestamp |-> m.bucket.timestamp, 
+                             succeeded |-> TRUE])
       /\ UNCHANGED <<states, terms, masterships, backups>>
    ELSE
       /\ SendMessage(m.src, [type |-> BackupResponse, succeeded |-> FALSE])
@@ -182,15 +202,22 @@ HandleBackupResponse(n, m) ==
 \* remote node 'm' to determine whether any flows are missing from the local node 'n'.
 RequestDigests(n, d, m) ==
    /\ n # m
-   /\ SendMessage(m, [type |-> DigestsRequest, did |-> d, src |-> n])
+   /\ SendMessage(m, [type |-> DigestsRequest,
+                      did  |-> d,
+                      src  |-> n])
    /\ UNCHANGED <<states, terms, masterships, backups, flows>>
 
 \* Handles a digest request 'm' on node 'n'
 \* When the digest request is received, a function of buckets is returned containing the bucket digests.
 \* Digests include the last term and logical time at which the bucket was updated on node 'n'.
 HandleDigestsRequest(n, m) ==
-   /\ LET digests == [bucket \in DOMAIN flows[n][m.did] |-> [term |-> flows[n][m.did][bucket].term, timestamp |-> flows[n][m.did][bucket].timestamp]]
-      IN SendMessage(m.src, [type |-> DigestsResponse, did |-> m.did, src |-> n, digests |-> digests])
+   /\ LET digests == [bucket \in DOMAIN flows[n][m.did] |-> [
+                         term      |-> flows[n][m.did][bucket].term,
+                         timestamp |-> flows[n][m.did][bucket].timestamp]]
+      IN SendMessage(m.src, [type    |-> DigestsResponse,
+                             did     |-> m.did,
+                             src     |-> n,
+                             digests |-> digests])
    /\ UNCHANGED <<states, terms, masterships, backups, flows>>
 
 \* Handles a digest response 'm' on node 'n'
@@ -198,8 +225,13 @@ HandleDigestsRequest(n, m) ==
 \* This implementation defines a function for which the domain is buckets that are more up-to-date
 \* than on local node 'n' according to the digests.
 HandleDigestsResponse(n, m) ==
-   /\ LET buckets == {bucket \in DOMAIN flows[n][m.did] : flows[n][m.did][bucket].term > m.digests[bucket].term \/ flows[n][m.did][bucket].timestamp > m.digests[bucket].timestamp}
-      IN SendMessage(m.src, [type |-> BucketsRequest, did |-> m.did, src |-> n, buckets |-> buckets])
+   /\ LET buckets == {bucket \in DOMAIN flows[n][m.did] :
+                        \/ flows[n][m.did][bucket].term > m.digests[bucket].term
+                        \/ flows[n][m.did][bucket].timestamp > m.digests[bucket].timestamp}
+      IN SendMessage(m.src, [type    |-> BucketsRequest,
+                             did     |-> m.did,
+                             src     |-> n,
+                             buckets |-> buckets])
    /\ UNCHANGED <<states, terms, masterships, backups, flows>>
 
 \* Handles a bucket request 'm' on node 'n'
@@ -207,14 +239,18 @@ HandleDigestsResponse(n, m) ==
 \* buckets in the request and thus is not designed for scalability.
 HandleBucketsRequest(n, m) ==
    /\ LET buckets == [bucket \in m.buckets |-> flows[n][m.did][bucket]]
-      IN SendMessage(m.src, [type |-> BucketsResponse, did |-> m.did, src |-> n, buckets |-> buckets])
+      IN SendMessage(m.src, [type |-> BucketsResponse,
+                             did |-> m.did,
+                             src |-> n,
+                             buckets |-> buckets])
    /\ UNCHANGED <<states, terms, masterships, backups, flows>>
 
 \* Handles a bucket response 'm' on node 'n'
 \* This implementation differs from the real-world implementation in that it handles an arbitrary number of
 \* buckets in the response and thus is not designed for scalability.
 HandleBucketsResponse(n, m) ==
-   /\ flows' = [flows EXCEPT ![n][m.did] = [b \in 1..NumBuckets |-> IF b \in DOMAIN m.buckets THEN m.buckets[b] ELSE flows[n][m.did][b]]]
+   /\ flows' = [flows EXCEPT ![n][m.did] = [b \in 1..NumBuckets |-> 
+                  IF b \in DOMAIN m.buckets THEN m.buckets[b] ELSE flows[n][m.did][b]]]
    /\ UNCHANGED <<states, terms, backups, flows>>
 
 \* Handles a message 'm' on node 'n'
@@ -259,5 +295,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Jun 20 17:06:11 PDT 2018 by jordanhalterman
+\* Last modified Wed Jun 20 17:49:54 PDT 2018 by jordanhalterman
 \* Created Mon Jun 18 21:52:20 PDT 2018 by jordanhalterman
