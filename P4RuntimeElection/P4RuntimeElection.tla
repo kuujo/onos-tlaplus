@@ -17,9 +17,6 @@ CONSTANTS WriteRequest, WriteResponse
 \* Response status constants
 CONSTANTS Ok, AlreadyExists, PermissionDenied
 
-\* Device/role constants used in P4 master arbitration requests
-CONSTANTS DeviceId, RoleId
-
 \* Empty value
 CONSTANT Nil
 
@@ -38,22 +35,28 @@ VARIABLE streams, requests, responses
 \* The current set of elections for the switch, the greatest of which is the current master
 VARIABLE elections
 
+\* Counting variables used to enforce state constraints
+VARIABLES mastershipChanges, streamChanges, messageCount
+
 ----
 
 \* Mastership/consensus related variables
-mastershipVars == <<term, master, backups>>
+mastershipVars == <<term, master, backups, mastershipChanges>>
 
 \* Node related variables
-nodeVars       == <<events, masterships>>
+nodeVars == <<events, masterships>>
 
-\* Stream/communication related variables
-streamVars     == <<streams, requests, responses>>
+\* Stream related variables
+streamVars == <<streams, streamChanges>>
+
+\* Message related variables
+messageVars == <<requests, responses, messageCount>>
 
 \* Device related variables
-deviceVars     == <<elections>>
+deviceVars == <<elections>>
 
 \* A sequence of all variables
-vars           == <<mastershipVars, nodeVars, streamVars, deviceVars>>
+vars == <<mastershipVars, nodeVars, streamVars, messageVars, deviceVars>>
 
 ----
 
@@ -63,6 +66,9 @@ Helpers
 
 \* Returns a sequence with the head removed
 Pop(q) == SubSeq(q, 2, Len(q))
+
+\* Returns a sequences with the element at the given index removed
+Drop(q, i) == SubSeq(q, 1, i-1) \circ SubSeq(q, i+1, Len(q))
 
 \* Returns the set of values in f
 Range(f) == {f[x] : x \in DOMAIN f}
@@ -81,25 +87,29 @@ all that stream's requests and responses are lost.
 *)
 
 \* Sends request 'm' on the stream for node 'n'
-SendRequest(n, m) == requests' = [requests EXCEPT ![n] = Append(requests[n], m)]
+SendRequest(n, m) ==
+    /\ requests' = [requests EXCEPT ![n] = Append(requests[n], m)]
+    /\ messageCount' = messageCount + 1
 
 \* Indicates whether any requests are in the queue for node 'n'
-HasRequest(n, t) == Len(requests) > 0 /\ requests[0].type = t
+HasRequest(n, t) == Len(requests[n]) > 0 /\ requests[n][1].type = t
 
 \* Returns the next request in the queue for node 'n'
-NextRequest(n) == requests[0]
+NextRequest(n) == requests[n][1]
 
 \* Discards the request at the head of the queue for node 'n'
 DiscardRequest(n) == requests' = [requests EXCEPT ![n] = Pop(requests[n])]
 
 \* Sends response 'm' on the stream for node 'n'
-SendResponse(n, m) == responses' = [responses EXCEPT ![n] = Append(responses[n], m)]
+SendResponse(n, m) ==
+    /\ responses' = [responses EXCEPT ![n] = Append(responses[n], m)]
+    /\ messageCount' = messageCount + 1
 
 \* Indicates whether any responses are in the queue for node 'n'
-HasResponse(n, t) == Len(responses) > 0 /\ responses[0].type = t
+HasResponse(n, t) == Len(responses[n]) > 0 /\ responses[n][1].type = t
 
 \* Returns the next response in the queue for node 'n'
-NextResponse(n) == responses[0]
+NextResponse(n) == responses[n][1]
 
 \* Discards the response at the head of the queue for node 'n'
 DiscardResponse(n) == responses' = [responses EXCEPT ![n] = Pop(responses[n])]
@@ -126,18 +136,19 @@ JoinMastershipElection(n) ==
                                             term |-> term',
                                             master |-> master',
                                             backups |-> backups'])]
-    /\ \/ /\ master # Nil
+       \/ /\ master # Nil
           /\ n \notin Range(backups)
           /\ backups' = Append(backups, n)
-          /\ UNCHANGED <<events>>
-    /\ UNCHANGED <<term, master, streamVars, deviceVars>>
+          /\ UNCHANGED <<term, master, events>>
+    /\ mastershipChanges' = mastershipChanges + 1
+    /\ UNCHANGED <<masterships, streamVars, messageVars, deviceVars>>
 
 \* Removes a node from the mastership election
 LeaveMastershipElection(n) ==
     /\ \/ /\ master = n
           /\ \/ /\ Len(backups) > 0
                 /\ term' = term + 1
-                /\ master' = backups[0]
+                /\ master' = backups[1]
                 /\ backups' = Pop(backups)
                 /\ events' = [i \in Nodes |-> Append(events[i], [
                                                   term |-> term',
@@ -145,35 +156,37 @@ LeaveMastershipElection(n) ==
                                                   backups |-> backups'])]
              \/ /\ Len(backups) = 0
                 /\ master' = Nil
-                /\ UNCHANGED <<term, backups>>
+                /\ UNCHANGED <<term, backups, events>>
        \/ /\ n \in Range(backups)
-          /\ backups' = [j \in DOMAIN backups \ {CHOOSE j \in DOMAIN backups : backups[j] = n} |-> backups[j]]
-          /\ UNCHANGED <<term, master>>
-    /\ UNCHANGED <<streamVars, deviceVars>>
+          /\ backups' = Drop(backups, CHOOSE j \in DOMAIN backups : backups[j] = n)
+          /\ UNCHANGED <<term, master, events>>
+    /\ mastershipChanges' = mastershipChanges + 1
+    /\ UNCHANGED <<masterships, streamVars, messageVars, deviceVars>>
 
-\* Changes mastership for the device in the consensus layer, adding a mastership
-\* change event to each node's event queue
-ChangeMastership ==
-    /\ term' = term + 1
-    /\ master' = backups[0]
-    /\ backups' = Append(Pop(backups), master)
-    /\ events' = [n \in Nodes |-> Append(events[n], [
-                                      term |-> term',
-                                      master |-> master',
-                                      backups |-> backups'])]
-    /\ UNCHANGED <<streamVars, deviceVars>>
+\* Sets the current master to node 'n' if it's not already set
+SetMastership(n) ==
+    /\ \/ /\ master = n
+          /\ UNCHANGED <<mastershipVars>>
+       \/ /\ master # n
+          /\ term' = term + 1
+          /\ master' = n
+          /\ \/ /\ n \in Range(backups)
+                /\ backups' = Drop(backups, CHOOSE j \in DOMAIN backups : backups[j] = n)
+             \/ /\ n \notin Range(backups)
+                /\ UNCHANGED <<backups>>
+          /\ mastershipChanges' = mastershipChanges + 1
 
 \* Receives a mastership change event from the consensus layer on node 'n'
 LearnMastership(n) ==
     /\ Len(events[n]) > 0
-    /\ LET m == events[n][0]
+    /\ LET m == events[n][1]
        IN
            /\ masterships' = [masterships EXCEPT ![n] = [
                                   term    |-> m.term,
                                   master  |-> m.master,
                                   backups |-> m.backups,
                                   sent    |-> FALSE]]
-    /\ UNCHANGED <<mastershipVars, streamVars, deviceVars, streams>>
+    /\ UNCHANGED <<mastershipVars, events, streamVars, messageVars, deviceVars>>
 
 \* Notifies the device of node 'n' mastership info if it hasn't already been sent
 SendMasterArbitrationUpdateRequest(n) ==
@@ -192,7 +205,7 @@ SendMasterArbitrationUpdateRequest(n) ==
                  /\ SendRequest(n, [
                         type        |-> MasterArbitrationUpdate,
                         election_id |-> 0])
-    /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, streams>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, streamVars, responses>>
 
 \* Receives a master arbitration update response on node 'n'
 ReceiveMasterArbitrationUpdateResponse(n) ==
@@ -200,9 +213,12 @@ ReceiveMasterArbitrationUpdateResponse(n) ==
     /\ HasResponse(n, MasterArbitrationUpdate)
     /\ LET m == NextResponse(n)
        IN
-           /\ m \* TODO
+           \/ /\ m.status = Ok
+              /\ SetMastership(n)
+           \/ /\ m.status = AlreadyExists
+              /\ UNCHANGED <<mastershipVars>>
     /\ DiscardResponse(n)
-    /\ UNCHANGED <<deviceVars, streams>>
+    /\ UNCHANGED <<nodeVars, deviceVars, streamVars, requests, messageCount>>
 
 \* Sends a write request to the device from node 'n'
 SendWriteRequest(n) ==
@@ -214,7 +230,7 @@ SendWriteRequest(n) ==
            /\ SendRequest(n, [
                   type        |-> WriteRequest,
                   election_id |-> m.term])
-    /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, streams>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, streamVars, responses>>
 
 \* Receives a write response on node 'n'
 ReceiveWriteResponse(n) ==
@@ -222,8 +238,11 @@ ReceiveWriteResponse(n) ==
     /\ HasResponse(n, WriteResponse)
     /\ LET m == NextResponse(n)
        IN
-           /\ m \* TODO: Handle the write response
-    /\ UNCHANGED <<mastershipVars, deviceVars, streams>>
+           \* TODO: This should be used to determine whether writes from old masters are allowed
+           \/ m.status = Ok
+           \/ m.status = PermissionDenied
+    /\ DiscardResponse(n)
+    /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, streamVars, requests, messageCount>>
 
 ----
 
@@ -234,8 +253,11 @@ and closed in a single state transition for the purposes of this model.
 Switches can handle two types of messages from the controller nodes: MasterArbitrationUpdate and Write.
 *)
 
+\* Returns the highest election ID for the given elections
+Election(e) == Max(Range(e))
+
 \* Returns the master for the given elections
-Master(e) == Max(Range(e))
+Master(e) == CHOOSE n \in DOMAIN e : e[n] = Election(e)
 
 \* Opens a new stream between node 'n' and the device
 \* When a new stream is opened, the 'requests' and 'responses' queues for the node are
@@ -245,7 +267,8 @@ ConnectStream(n) ==
     /\ streams' = [streams EXCEPT ![n] = Open]
     /\ requests' = [requests EXCEPT ![n] = <<>>]
     /\ responses' = [responses EXCEPT ![n] = <<>>]
-    /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars>>
+    /\ streamChanges' = streamChanges + 1
+    /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, messageCount>>
 
 \* Closes the open stream between node 'n' and the device
 \* When the stream is closed, the 'requests' and 'responses' queues for the node are
@@ -260,13 +283,21 @@ CloseStream(n) ==
            newMaster == Master(elections')
        IN
            \/ /\ oldMaster # newMaster
-              /\ responses' = [i \in DOMAIN streams' |-> Append(responses[i], [
-                                                             type        |-> MasterArbitrationUpdate,
-                                                             status      |-> Ok,
-                                                             election_id |-> newMaster])]
+              /\ responses' = [i \in DOMAIN streams' |->
+                                  IF i = newMaster THEN
+                                      Append(responses[i], [
+                                          type        |-> MasterArbitrationUpdate,
+                                          status      |-> Ok,
+                                          election_id |-> newMaster])
+                                  ELSE
+                                      Append(responses[i], [
+                                          type        |-> MasterArbitrationUpdate,
+                                          status      |-> AlreadyExists,
+                                          election_id |-> newMaster])]
            \/ /\ oldMaster = newMaster
               /\ responses' = [responses EXCEPT ![n] = <<>>]
-    /\ UNCHANGED <<mastershipVars, nodeVars>>
+    /\ streamChanges' = streamChanges + 1
+    /\ UNCHANGED <<mastershipVars, nodeVars, messageCount>>
 
 \* Handles a master arbitration update on the device
 \* If the election_id is already present in the 'elections', send an 'AlreadyExists'
@@ -276,27 +307,37 @@ HandleMasterArbitrationUpdate(n) ==
     /\ HasRequest(n, MasterArbitrationUpdate)
     /\ LET m == NextRequest(n)
        IN
-           \/ /\ m.election_id \in elections
+           \/ /\ m.election_id \in Range(elections)
               /\ SendResponse(n, [
                      type        |-> MasterArbitrationUpdate,
                      election_id |-> m.election_id,
                      status      |-> AlreadyExists])
               /\ UNCHANGED <<deviceVars>>
-           \/ /\ LET oldMaster == Master(elections)
+           \/ /\ m.election_id \notin Range(elections)
+              /\ elections' = [elections EXCEPT ![n] = m.election_id]
+              /\ LET oldMaster == Master(elections)
                      newMaster == Master(elections')
                  IN
                      \/ /\ oldMaster # newMaster
-                        /\ responses' = [i \in DOMAIN streams |-> Append(responses[i], [
-                                                                       type        |-> MasterArbitrationUpdate,
-                                                                       status      |-> Ok,
-                                                                       election_id |-> newMaster])]
+                        /\ responses' = [i \in DOMAIN streams |->
+                                            IF i = newMaster THEN
+                                                Append(responses[i], [
+                                                    type        |-> MasterArbitrationUpdate,
+                                                    status      |-> Ok,
+                                                    election_id |-> newMaster])
+                                            ELSE
+                                                Append(responses[i], [
+                                                    type        |-> MasterArbitrationUpdate,
+                                                    status      |-> AlreadyExists,
+                                                    election_id |-> newMaster])]
+                        /\ messageCount = messageCount + 1
                      \/ /\ oldMaster = newMaster
                         /\ SendResponse(n, [
                                type        |-> MasterArbitrationUpdate,
                                status      |-> Ok,
                                election_id |-> newMaster])
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<mastershipVars, nodeVars, streams>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, streamVars>>
 
 \* Handles a write request on the device
 HandleWrite(n) ==
@@ -308,16 +349,17 @@ HandleWrite(n) ==
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> PermissionDenied])
-           \/ /\ Max(Range(elections)) # m.election_id
+           \/ /\ Election(elections) # m.election_id
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> PermissionDenied])
-           \/ /\ m.election_id \notin elections
+           \/ /\ m.election_id \notin Range(elections)
               /\ elections[n] = m.election_id
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> Ok])
-    /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars>>
+    /\ DiscardRequest(n)
+    /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, streamVars>>
 
 ----
 
@@ -325,29 +367,32 @@ Init ==
     /\ term = 0
     /\ master = Nil
     /\ backups = <<>>
-    /\ masterships = [n \in DOMAIN Nodes |-> [term |-> 0, master |-> 0, backups |-> <<>>]]
-    /\ streams = [n \in DOMAIN Nodes |-> Closed]
-    /\ requests = [n \in DOMAIN Nodes |-> <<>>]
-    /\ responses = [n \in DOMAIN Nodes |-> <<>>]
-    /\ elections = [i \in DOMAIN Nodes |-> 0]
+    /\ events = [n \in Nodes |-> <<>>]
+    /\ masterships = [n \in Nodes |-> [term |-> 0, master |-> 0, backups |-> <<>>]]
+    /\ streams = [n \in Nodes |-> Closed]
+    /\ requests = [n \in Nodes |-> <<>>]
+    /\ responses = [n \in Nodes |-> <<>>]
+    /\ elections = [n \in Nodes |-> 0]
+    /\ mastershipChanges = 0
+    /\ streamChanges = 0
+    /\ messageCount = 0
 
 Next == 
-    \/ \E n \in DOMAIN Nodes : ConnectStream(n)
-    \/ \E n \in DOMAIN Nodes : CloseStream(n)
-    \/ \E n \in DOMAIN Nodes : JoinMastershipElection(n)
-    \/ \E n \in DOMAIN Nodes : LeaveMastershipElection(n)
-    \/ \E n \in DOMAIN Nodes : LearnMastership(n)
-    \/ \E n \in DOMAIN Nodes : SendMasterArbitrationUpdateRequest(n)
-    \/ \E n \in DOMAIN Nodes : HandleMasterArbitrationUpdate(n)
-    \/ \E n \in DOMAIN Nodes : ReceiveMasterArbitrationUpdateResponse(n)
-    \/ \E n \in DOMAIN Nodes : SendWriteRequest(n)
-    \/ \E n \in DOMAIN Nodes : HandleWrite(n)
-    \/ \E n \in DOMAIN Nodes : ReceiveWriteResponse(n)
-    \/ ChangeMastership
+    \/ \E n \in Nodes : ConnectStream(n)
+    \/ \E n \in Nodes : CloseStream(n)
+    \/ \E n \in Nodes : JoinMastershipElection(n)
+    \/ \E n \in Nodes : LeaveMastershipElection(n)
+    \/ \E n \in Nodes : LearnMastership(n)
+    \/ \E n \in Nodes : SendMasterArbitrationUpdateRequest(n)
+    \/ \E n \in Nodes : HandleMasterArbitrationUpdate(n)
+    \/ \E n \in Nodes : ReceiveMasterArbitrationUpdateResponse(n)
+    \/ \E n \in Nodes : SendWriteRequest(n)
+    \/ \E n \in Nodes : HandleWrite(n)
+    \/ \E n \in Nodes : ReceiveWriteResponse(n)
 
 Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Fri Feb 15 18:05:05 PST 2019 by jordanhalterman
+\* Last modified Sat Feb 16 01:00:10 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman
