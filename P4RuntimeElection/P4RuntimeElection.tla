@@ -197,7 +197,7 @@ LearnMastership(n) ==
                                      term    |-> e.term,
                                      master  |-> e.master,
                                      backups |-> e.backups,
-                                     sent    |-> TRUE]]
+                                     sent    |-> m.sent]]
     /\ events' = [events EXCEPT ![n] = Pop(events[n])]
     /\ UNCHANGED <<mastershipVars, streamVars, messageVars, deviceVars>>
 
@@ -411,5 +411,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Sat Feb 16 01:59:18 PST 2019 by jordanhalterman
+\* Last modified Sat Feb 16 02:15:42 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman
