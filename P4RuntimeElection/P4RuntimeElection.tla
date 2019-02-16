@@ -139,7 +139,11 @@ JoinMastershipElection(n) ==
        \/ /\ master # Nil
           /\ n \notin Range(backups)
           /\ backups' = Append(backups, n)
-          /\ UNCHANGED <<term, master, events>>
+          /\ events' = [i \in Nodes |-> Append(events[i], [
+                                            term |-> term,
+                                            master |-> master,
+                                            backups |-> backups'])]
+          /\ UNCHANGED <<term, master>>
     /\ mastershipChanges' = mastershipChanges + 1
     /\ UNCHANGED <<masterships, streamVars, messageVars, deviceVars>>
 
@@ -165,33 +169,40 @@ LeaveMastershipElection(n) ==
 
 \* Sets the current master to node 'n' if it's not already set
 SetMastership(n) ==
-    /\ \/ /\ master = n
-          /\ UNCHANGED <<mastershipVars>>
-       \/ /\ master # n
-          /\ term' = term + 1
-          /\ master' = n
-          /\ \/ /\ n \in Range(backups)
-                /\ backups' = Drop(backups, CHOOSE j \in DOMAIN backups : backups[j] = n)
-             \/ /\ n \notin Range(backups)
-                /\ UNCHANGED <<backups>>
-          /\ mastershipChanges' = mastershipChanges + 1
+    \/ /\ master = n
+       /\ UNCHANGED <<mastershipVars>>
+    \/ /\ master # n
+       /\ term' = term + 1
+       /\ master' = n
+       /\ \/ /\ n \in Range(backups)
+             /\ backups' = Drop(backups, CHOOSE j \in DOMAIN backups : backups[j] = n)
+          \/ /\ n \notin Range(backups)
+             /\ UNCHANGED <<backups>>
+       /\ mastershipChanges' = mastershipChanges + 1
 
 \* Receives a mastership change event from the consensus layer on node 'n'
 LearnMastership(n) ==
     /\ Len(events[n]) > 0
-    /\ LET m == events[n][1]
+    /\ LET e == events[n][1]
+           m == masterships[n]
        IN
-           /\ masterships' = [masterships EXCEPT ![n] = [
-                                  term    |-> m.term,
-                                  master  |-> m.master,
-                                  backups |-> m.backups,
-                                  sent    |-> FALSE]]
-    /\ UNCHANGED <<mastershipVars, events, streamVars, messageVars, deviceVars>>
+           \/ /\ e.term > m.term
+              /\ masterships' = [masterships EXCEPT ![n] = [
+                                     term    |-> e.term,
+                                     master  |-> e.master,
+                                     backups |-> e.backups,
+                                     sent    |-> FALSE]]
+           \/ /\ e.term = m.term
+              /\ masterships' = [masterships EXCEPT ![n] = [
+                                     term    |-> e.term,
+                                     master  |-> e.master,
+                                     backups |-> e.backups,
+                                     sent    |-> TRUE]]
+    /\ events' = [events EXCEPT ![n] = Pop(events[n])]
+    /\ UNCHANGED <<mastershipVars, streamVars, messageVars, deviceVars>>
 
 \* Notifies the device of node 'n' mastership info if it hasn't already been sent
 SendMasterArbitrationUpdateRequest(n) ==
-    /\ masterships[n].term > 0
-    /\ ~masterships[n].sent
     /\ streams[n] = Open
     /\ LET m == masterships[n]
        IN
@@ -200,12 +211,14 @@ SendMasterArbitrationUpdateRequest(n) ==
            /\ \/ /\ m.master = n
                  /\ SendRequest(n, [
                         type        |-> MasterArbitrationUpdate,
-                        election_id |-> m.term])
+                        election_id |-> m.term + Cardinality(Nodes)])
               \/ /\ m.master # n
+                 /\ n \in Range(m.backups)
                  /\ SendRequest(n, [
                         type        |-> MasterArbitrationUpdate,
-                        election_id |-> 0])
-    /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, streamVars, responses>>
+                        election_id |-> m.term + Cardinality(Nodes) - CHOOSE i \in DOMAIN m.backups : m.backups[i] = n])
+    /\ masterships' = [masterships EXCEPT ![n].sent = TRUE]
+    /\ UNCHANGED <<mastershipVars, events, deviceVars, streamVars, responses>>
 
 \* Receives a master arbitration update response on node 'n'
 ReceiveMasterArbitrationUpdateResponse(n) ==
@@ -229,7 +242,7 @@ SendWriteRequest(n) ==
            /\ m.master = n
            /\ SendRequest(n, [
                   type        |-> WriteRequest,
-                  election_id |-> m.term])
+                  election_id |-> m.term + Cardinality(Nodes)])
     /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, streamVars, responses>>
 
 \* Receives a write response on node 'n'
@@ -254,10 +267,14 @@ Switches can handle two types of messages from the controller nodes: MasterArbit
 *)
 
 \* Returns the highest election ID for the given elections
-Election(e) == Max(Range(e))
+ElectionId(e) == Max(Range(e))
 
 \* Returns the master for the given elections
-Master(e) == CHOOSE n \in DOMAIN e : e[n] = Election(e)
+Master(e) == 
+    IF Cardinality({i \in Range(e) : i > 0}) > 0 THEN
+        CHOOSE n \in DOMAIN e : e[n] = ElectionId(e)
+    ELSE
+        Nil
 
 \* Opens a new stream between node 'n' and the device
 \* When a new stream is opened, the 'requests' and 'responses' queues for the node are
@@ -288,12 +305,12 @@ CloseStream(n) ==
                                       Append(responses[i], [
                                           type        |-> MasterArbitrationUpdate,
                                           status      |-> Ok,
-                                          election_id |-> newMaster])
+                                          election_id |-> ElectionId(elections')])
                                   ELSE
                                       Append(responses[i], [
                                           type        |-> MasterArbitrationUpdate,
                                           status      |-> AlreadyExists,
-                                          election_id |-> newMaster])]
+                                          election_id |-> ElectionId(elections')])]
            \/ /\ oldMaster = newMaster
               /\ responses' = [responses EXCEPT ![n] = <<>>]
     /\ streamChanges' = streamChanges + 1
@@ -324,18 +341,18 @@ HandleMasterArbitrationUpdate(n) ==
                                                 Append(responses[i], [
                                                     type        |-> MasterArbitrationUpdate,
                                                     status      |-> Ok,
-                                                    election_id |-> newMaster])
+                                                    election_id |-> ElectionId(elections')])
                                             ELSE
                                                 Append(responses[i], [
                                                     type        |-> MasterArbitrationUpdate,
                                                     status      |-> AlreadyExists,
-                                                    election_id |-> newMaster])]
+                                                    election_id |-> ElectionId(elections')])]
                         /\ messageCount = messageCount + 1
                      \/ /\ oldMaster = newMaster
                         /\ SendResponse(n, [
                                type        |-> MasterArbitrationUpdate,
                                status      |-> Ok,
-                               election_id |-> newMaster])
+                               election_id |-> ElectionId(elections')])
     /\ DiscardRequest(n)
     /\ UNCHANGED <<mastershipVars, nodeVars, streamVars>>
 
@@ -349,7 +366,7 @@ HandleWrite(n) ==
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> PermissionDenied])
-           \/ /\ Election(elections) # m.election_id
+           \/ /\ ElectionId(elections) # m.election_id
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> PermissionDenied])
@@ -394,5 +411,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Sat Feb 16 01:00:10 PST 2019 by jordanhalterman
+\* Last modified Sat Feb 16 01:59:18 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman
