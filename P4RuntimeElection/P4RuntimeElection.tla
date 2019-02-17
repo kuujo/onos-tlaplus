@@ -371,16 +371,18 @@ HandleWrite(n) ==
     /\ HasRequest(n, WriteRequest)
     /\ LET m == NextRequest(n)
        IN
-           \/ /\ Master(elections) # n
-              /\ SendResponse(n, [
-                     type   |-> WriteResponse,
-                     status |-> PermissionDenied])
-              /\ UNCHANGED <<writes>>
-           \/ /\ Master(elections) = n
+           \/ /\ elections[n] = m.election_id
+              /\ Master(elections) = n
               /\ writes' = Append(writes, [node |-> n, term |-> m.term])
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> Ok])
+           \/ /\ \/ elections[n] # m.election_id
+                 \/ Master(elections) # n
+              /\ SendResponse(n, [
+                     type   |-> WriteResponse,
+                     status |-> PermissionDenied])
+              /\ UNCHANGED <<writes>>
     /\ DiscardRequest(n)
     /\ UNCHANGED <<mastershipVars, nodeVars, elections, streamVars>>
 
@@ -424,5 +426,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Feb 17 01:26:56 PST 2019 by jordanhalterman
+\* Last modified Sun Feb 17 03:10:44 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman
