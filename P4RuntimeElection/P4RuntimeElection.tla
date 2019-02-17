@@ -137,6 +137,7 @@ JoinMastershipElection(n) ==
                                             master |-> master',
                                             backups |-> backups'])]
        \/ /\ master # Nil
+          /\ master # n
           /\ n \notin Range(backups)
           /\ backups' = Append(backups, n)
           /\ events' = [i \in Nodes |-> Append(events[i], [
@@ -311,10 +312,12 @@ CloseStream(n) ==
                                           type        |-> MasterArbitrationUpdate,
                                           status      |-> AlreadyExists,
                                           election_id |-> ElectionId(elections')])]
+              /\ messageCount' = messageCount + 1
            \/ /\ oldMaster = newMaster
               /\ responses' = [responses EXCEPT ![n] = <<>>]
+              /\ UNCHANGED <<messageCount>>
     /\ streamChanges' = streamChanges + 1
-    /\ UNCHANGED <<mastershipVars, nodeVars, messageCount>>
+    /\ UNCHANGED <<mastershipVars, nodeVars>>
 
 \* Handles a master arbitration update on the device
 \* If the election_id is already present in the 'elections', send an 'AlreadyExists'
@@ -347,7 +350,7 @@ HandleMasterArbitrationUpdate(n) ==
                                                     type        |-> MasterArbitrationUpdate,
                                                     status      |-> AlreadyExists,
                                                     election_id |-> ElectionId(elections')])]
-                        /\ messageCount = messageCount + 1
+                        /\ messageCount' = messageCount + 1
                      \/ /\ oldMaster = newMaster
                         /\ SendResponse(n, [
                                type        |-> MasterArbitrationUpdate,
@@ -385,7 +388,7 @@ Init ==
     /\ master = Nil
     /\ backups = <<>>
     /\ events = [n \in Nodes |-> <<>>]
-    /\ masterships = [n \in Nodes |-> [term |-> 0, master |-> 0, backups |-> <<>>]]
+    /\ masterships = [n \in Nodes |-> [term |-> 0, master |-> 0, backups |-> <<>>, sent |-> FALSE]]
     /\ streams = [n \in Nodes |-> Closed]
     /\ requests = [n \in Nodes |-> <<>>]
     /\ responses = [n \in Nodes |-> <<>>]
@@ -411,5 +414,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Sat Feb 16 02:15:42 PST 2019 by jordanhalterman
+\* Last modified Sun Feb 17 00:35:14 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman
