@@ -38,6 +38,9 @@ VARIABLE elections
 \* Counting variables used to enforce state constraints
 VARIABLES mastershipChanges, streamChanges, messageCount
 
+\* A sequence of successful writes to the switch used for model checking
+VARIABLE writes
+
 ----
 
 \* Mastership/consensus related variables
@@ -53,7 +56,7 @@ streamVars == <<streams, streamChanges>>
 messageVars == <<requests, responses, messageCount>>
 
 \* Device related variables
-deviceVars == <<elections>>
+deviceVars == <<elections, writes>>
 
 \* A sequence of all variables
 vars == <<mastershipVars, nodeVars, streamVars, messageVars, deviceVars>>
@@ -212,12 +215,14 @@ SendMasterArbitrationUpdateRequest(n) ==
            /\ \/ /\ m.master = n
                  /\ SendRequest(n, [
                         type        |-> MasterArbitrationUpdate,
-                        election_id |-> m.term + Cardinality(Nodes)])
+                        election_id |-> m.term + Cardinality(Nodes),
+                        term        |-> m.term])
               \/ /\ m.master # n
                  /\ n \in Range(m.backups)
                  /\ SendRequest(n, [
                         type        |-> MasterArbitrationUpdate,
-                        election_id |-> m.term + Cardinality(Nodes) - CHOOSE i \in DOMAIN m.backups : m.backups[i] = n])
+                        election_id |-> m.term + Cardinality(Nodes) - CHOOSE i \in DOMAIN m.backups : m.backups[i] = n,
+                        term        |-> m.term])
     /\ masterships' = [masterships EXCEPT ![n].sent = TRUE]
     /\ UNCHANGED <<mastershipVars, events, deviceVars, streamVars, responses>>
 
@@ -243,7 +248,8 @@ SendWriteRequest(n) ==
            /\ m.master = n
            /\ SendRequest(n, [
                   type        |-> WriteRequest,
-                  election_id |-> m.term + Cardinality(Nodes)])
+                  election_id |-> m.term + Cardinality(Nodes),
+                  term        |-> m.term])
     /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, streamVars, responses>>
 
 \* Receives a write response on node 'n'
@@ -317,7 +323,7 @@ CloseStream(n) ==
               /\ responses' = [responses EXCEPT ![n] = <<>>]
               /\ UNCHANGED <<messageCount>>
     /\ streamChanges' = streamChanges + 1
-    /\ UNCHANGED <<mastershipVars, nodeVars>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, writes>>
 
 \* Handles a master arbitration update on the device
 \* If the election_id is already present in the 'elections', send an 'AlreadyExists'
@@ -357,7 +363,7 @@ HandleMasterArbitrationUpdate(n) ==
                                status      |-> Ok,
                                election_id |-> ElectionId(elections')])
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<mastershipVars, nodeVars, streamVars>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, streamVars, writes>>
 
 \* Handles a write request on the device
 HandleWrite(n) ==
@@ -365,21 +371,24 @@ HandleWrite(n) ==
     /\ HasRequest(n, WriteRequest)
     /\ LET m == NextRequest(n)
        IN
-           \/ /\ Cardinality(DOMAIN elections) = 0
+           \/ /\ Master(elections) # n
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> PermissionDenied])
-           \/ /\ ElectionId(elections) # m.election_id
-              /\ SendResponse(n, [
-                     type   |-> WriteResponse,
-                     status |-> PermissionDenied])
-           \/ /\ m.election_id \notin Range(elections)
-              /\ elections[n] = m.election_id
+              /\ UNCHANGED <<writes>>
+           \/ /\ Master(elections) = n
+              /\ writes' = Append(writes, [node |-> n, term |-> m.term])
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> Ok])
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, streamVars>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, elections, streamVars>>
+
+----
+
+\* The invariant asserts that no master can write to the switch after the switch
+\* has been notified of a newer master
+TypeInvariant == \A i \in DOMAIN writes : i = 1 \/ writes[i-1].term <= writes[i].term
 
 ----
 
@@ -396,6 +405,7 @@ Init ==
     /\ mastershipChanges = 0
     /\ streamChanges = 0
     /\ messageCount = 0
+    /\ writes = <<>>
 
 Next == 
     \/ \E n \in Nodes : ConnectStream(n)
@@ -414,5 +424,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Feb 17 00:35:14 PST 2019 by jordanhalterman
+\* Last modified Sun Feb 17 01:26:56 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman
