@@ -41,8 +41,8 @@ VARIABLE elections
 \* Counting variables used to enforce state constraints
 VARIABLES mastershipChanges, streamChanges, messageCount
 
-\* A sequence of successful writes to the switch used for model checking
-VARIABLE writes
+\* A history of successful writes to the switch used for model checking
+VARIABLE history
 
 ----
 
@@ -59,7 +59,7 @@ streamVars == <<streams, streamChanges>>
 messageVars == <<requests, responses, messageCount>>
 
 \* Device related variables
-deviceVars == <<elections, writes>>
+deviceVars == <<elections, history>>
 
 \* A sequence of all variables
 vars == <<mastershipVars, nodeVars, streamVars, messageVars, deviceVars>>
@@ -85,11 +85,12 @@ Max(s) == CHOOSE x \in s : \A y \in s : x >= y
 ----
 
 (*
-Messaging between the Nodes and the device are modelled on TCP. For each node, a request
-and response sequence provides ordered messaging between the two points. Requests and
-responses are always received from the head of the queue and are never duplicated or reordered,
-and request and response queues only last the lifetime of the stream. When a stream is closed,
-all that stream's requests and responses are lost.
+This section models the messaging between controller nodes and the device.
+Messaging is modelled on TCP, providing strict ordering between controller and device via
+sequences. The 'requests' sequence represents the messages from controller to device for
+each node, and the 'responses' sequence represents the messages from device to each node.
+Requests and responses are always received from the head of the queue and are never
+duplicated or reordered.
 *)
 
 \* Sends request 'm' on the stream for node 'n'
@@ -97,7 +98,7 @@ SendRequest(n, m) ==
     /\ requests' = [requests EXCEPT ![n] = Append(requests[n], m)]
     /\ messageCount' = messageCount + 1
 
-\* Indicates whether any requests are in the queue for node 'n'
+\* Indicates whether a request of type 't' is at the head of the queue for node 'n'
 HasRequest(n, t) == Len(requests[n]) > 0 /\ requests[n][1].type = t
 
 \* Returns the next request in the queue for node 'n'
@@ -111,7 +112,7 @@ SendResponse(n, m) ==
     /\ responses' = [responses EXCEPT ![n] = Append(responses[n], m)]
     /\ messageCount' = messageCount + 1
 
-\* Indicates whether any responses are in the queue for node 'n'
+\* Indicates whether a response of type 't' is at the head of the queue for node 'n'
 HasResponse(n, t) == Len(responses[n]) > 0 /\ responses[n][1].type = t
 
 \* Returns the next response in the queue for node 'n'
@@ -123,16 +124,20 @@ DiscardResponse(n) == responses' = [responses EXCEPT ![n] = Pop(responses[n])]
 ----
 
 (*
-This section models mastership arbitration on the controller side.
-Mastership election occurs in two disctinct types of state changes. One state change occurs
-to change the mastership in the consensus layer, and the other occurs when a node actually
-learns of the mastership change. Nodes will always learn of mastership changes in the order
-in which they occur, and nodes will always learn of a mastership change. This, of course,
-is not representative of practice but is sufficient for modelling the mastership election
-algorithm.
+This section models the mastership election service used by the controller to elect masters.
+Mastership changes through join and leave steps. Mastership is done through a consensus
+service, so these steps are atomic. When a node joins or leaves the mastership election,
+events are queued to notify nodes of the mastership change. Nodes learn of mastership
+changes independently of the state change in the consensus service.
 *)
 
+
 \* Adds a node to the mastership election
+(*
+If the current 'master' is Nil, set the master to node 'n', increment the 'term',
+and send a mastership change event to each node.
+If the current 'master' is non-Nil, append node 'n' to the sequence of 'backups'.
+*)
 JoinMastershipElection(n) ==
     /\ \/ /\ master = Nil
           /\ term' = term + 1
@@ -155,6 +160,13 @@ JoinMastershipElection(n) ==
     /\ UNCHANGED <<masterships, isMaster, streamVars, messageVars, deviceVars>>
 
 \* Removes a node from the mastership election
+(*
+If node 'n' is the current 'master' and a backup exists, increment the 'term',
+promote the first backup to master, and send a mastership change event to each node.
+If node 'n' is the current 'master' and no backups exist, set the 'master'
+to Nil.
+If node 'n' is in the sequence of 'backups', simply remove it.
+*)
 LeaveMastershipElection(n) ==
     /\ \/ /\ master = n
           /\ \/ /\ Len(backups) > 0
@@ -187,7 +199,21 @@ SetMastership(n) ==
              /\ UNCHANGED <<backups>>
        /\ mastershipChanges' = mastershipChanges + 1
 
+----
+
+(*
+This section models controller-side mastership arbitration. The controller nodes
+receive mastership change events from the mastership service and send master
+arbitration requests to the device. Additionally, master nodes can send write
+requests to the device.
+*)
+
 \* Receives a mastership change event from the consensus layer on node 'n'
+(*
+When a mastership change event is received, the node's local mastership state
+is updated. If the mastership term has changed, the node will set a flag to
+push the mastership change to the device in the master arbitration step.
+*)
 LearnMastership(n) ==
     /\ Len(events[n]) > 0
     /\ LET e == events[n][1]
@@ -209,6 +235,17 @@ LearnMastership(n) ==
     /\ UNCHANGED <<mastershipVars, isMaster, streamVars, messageVars, deviceVars>>
 
 \* Notifies the device of node 'n' mastership info if it hasn't already been sent
+(*
+If the node has an open stream to the device and a valid mastership state,
+a MasterArbitrationUpdate is sent to the device. If the node is a backup, the
+request's 'election_id' is set to (mastership term) + (number of nodes) - (backup index).
+If the node is the master, the 'election_id' is set to (mastership term) + (number of nodes).
+This is done to avoid election_ids <= 0.
+Note that the actual protocol requires a (device_id, role_id, election_id) tuple, but
+(device_id, role_id) have been excluded from this model as we're modelling interaction
+only within a single (device_id, role_id) and thus they're irrelevant to correctness.
+The mastership term is sent in MasterArbitrationUpdate requests for model checking.
+*)
 SendMasterArbitrationUpdateRequest(n) ==
     /\ streams[n] = Open
     /\ LET m == masterships[n]
@@ -230,11 +267,22 @@ SendMasterArbitrationUpdateRequest(n) ==
     /\ UNCHANGED <<mastershipVars, events, isMaster, deviceVars, streamVars, responses>>
 
 \* Receives a master arbitration update response on node 'n'
+(*
+If the node has an open stream with a MasterArbitrationUpdate, determine whether
+the local node is the master. If the MasterArbitrationUpdate 'status' is Ok,
+update the node's state to master. Otherwise, the AlreadyExists 'status' indicates
+the device does not consider this node the master.
+Note that the separate 'isMaster' state is maintained to indicate whether the
+*device* considers this node to be the current master, and this is necessary for
+the safety of the algorithm. Both the mastership service and the device must agree
+on the mastership status of the node.
+*)
 ReceiveMasterArbitrationUpdateResponse(n) ==
     /\ streams[n] = Open
     /\ HasResponse(n, MasterArbitrationUpdate)
     /\ LET m == NextResponse(n)
        IN
+           \* TODO: Check that the returned election_id matches the current mastership term
            \/ /\ m.status = Ok
               /\ isMaster' = [isMaster EXCEPT ![n] = TRUE]
               /\ SetMastership(n)
@@ -245,6 +293,14 @@ ReceiveMasterArbitrationUpdateResponse(n) ==
     /\ UNCHANGED <<events, masterships, deviceVars, streamVars, requests, messageCount>>
 
 \* Sends a write request to the device from node 'n'
+(*
+To write to the device, the node must have an open stream, must have received a
+mastership change event from the mastership service (stored in 'masterships')
+indicating it is the master, and must have received a MasterArbitrationUpdate
+from the switch indicating it is the master (stored in 'isMaster') for the same
+term as was indicated by the mastership service.
+The term is sent with the WriteRequest for model checking.
+*)
 SendWriteRequest(n) ==
     /\ streams[n] = Open
     /\ LET m == masterships[n]
@@ -264,7 +320,6 @@ ReceiveWriteResponse(n) ==
     /\ HasResponse(n, WriteResponse)
     /\ LET m == NextResponse(n)
        IN
-           \* TODO: This should be used to determine whether writes from old masters are allowed
            \/ m.status = Ok
            \/ m.status = PermissionDenied
     /\ DiscardResponse(n)
@@ -273,10 +328,12 @@ ReceiveWriteResponse(n) ==
 ----
 
 (*
-This section models the P4 switch.
-The switch side manages stream states between the device and the controller. Streams are opened
-and closed in a single state transition for the purposes of this model.
-Switches can handle two types of messages from the controller nodes: MasterArbitrationUpdate and Write.
+This section models a P4 Runtime device. For the purposes of this spec, the device
+has two functions: determine a master controller node and accept writes. Mastership
+is determined through MasterArbitrationUpdates sent by the controller nodes. The
+'election_id's provided by controller nodes are stored in 'elections', and the master
+is computed as the node with the highest 'election_id' at any given time. The device
+will only allow writes from the current master node.
 *)
 
 \* Returns the highest election ID for the given elections
@@ -290,18 +347,26 @@ Master(e) ==
         Nil
 
 \* Opens a new stream between node 'n' and the device
-\* When a new stream is opened, the 'requests' and 'responses' queues for the node are
-\* cleared and the 'streams' state is set to 'Open'.
+(*
+When a stream is opened, the 'streams' state for node 'n' is set to Open.
+Stream creation is modelled as a single step to reduce the state space.
+*)
 ConnectStream(n) ==
     /\ streams[n] = Closed
     /\ streams' = [streams EXCEPT ![n] = Open]
     /\ streamChanges' = streamChanges + 1
     /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, messageVars>>
 
-\* Closes the open stream between node 'n' and the device
-\* When the stream is closed, the 'requests' and 'responses' queues for the node are
-\* cleared and a 'MasterArbitrationUpdate' is sent to all remaining connected nodes
-\* to notify them of a mastership change if necessary.
+\* Closes an open stream between node 'n' and the device
+(*
+When a stream is closed, the 'streams' state for node 'n' is set to Closed,
+any 'election_id' provided by node 'n' is forgotten, and the 'requests'
+and 'responses' queues for the node are cleared.
+Additionally, if the stream belonged to the master node, a new master is
+elected and a MasterArbitrationUpdate is sent on the streams that remain
+in the Open state. The MasterArbitrationUpdate will be sent to the new master
+with a 'status' of Ok and to all slaves with a 'status' of AlreadyExists.
+*)
 CloseStream(n) ==
     /\ streams[n] = Open
     /\ elections' = [elections EXCEPT ![n] = 0]
@@ -330,11 +395,21 @@ CloseStream(n) ==
               /\ responses' = [responses EXCEPT ![n] = <<>>]
               /\ UNCHANGED <<messageCount>>
     /\ streamChanges' = streamChanges + 1
-    /\ UNCHANGED <<mastershipVars, nodeVars, writes>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, history>>
 
-\* Handles a master arbitration update on the device
-\* If the election_id is already present in the 'elections', send an 'AlreadyExists'
-\* response to the node. Otherwise, 
+\* Handles a MasterArbitrationUpdate message sent from node 'n' to the device
+(*
+If the 'election_id' is already present in the 'elections' and does not
+already belong to node 'n', the stream is Closed and 'requests' and 'responses'
+are cleared for the node.
+If the 'election_id' is not known to the device, it's added to the 'elections'
+state. If the change results in a new master being elected by the device,
+a MasterArbitrationUpdate is sent on all Open streams. If the change does not
+result in a new master being elected by the device, node 'n' is returned a
+MasterArbitrationUpdate. The device master will always receive a
+MasterArbitrationUpdate response with 'status' of Ok, and slaves will always
+receive a 'status' of AlreadyExists.
+*)
 HandleMasterArbitrationUpdate(n) ==
     /\ streams[n] = Open
     /\ HasRequest(n, MasterArbitrationUpdate)
@@ -368,15 +443,26 @@ HandleMasterArbitrationUpdate(n) ==
                                                 responses[i]]
                         /\ messageCount' = messageCount + 1
                      \/ /\ oldMaster = newMaster
-                        /\ SendResponse(n, [
-                               type        |-> MasterArbitrationUpdate,
-                               status      |-> Ok,
-                               election_id |-> ElectionId(elections')])
+                        /\ \/ /\ n = newMaster
+                              /\ SendResponse(n, [
+                                     type        |-> MasterArbitrationUpdate,
+                                     status      |-> Ok,
+                                     election_id |-> ElectionId(elections')])
+                           \/ /\ n # newMaster
+                              /\ SendResponse(n, [
+                                     type        |-> MasterArbitrationUpdate,
+                                     status      |-> AlreadyExists,
+                                     election_id |-> ElectionId(elections')])
               /\ UNCHANGED <<streamVars>>
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<mastershipVars, nodeVars, writes>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, history>>
 
 \* Handles a write request on the device
+(*
+If the WriteRequest 'election_id' matches the 'election_id' recorded on the device
+for node 'n' and the node is the current master for the device, accept the write
+and record the term for model checking. Otherwise, return a 'PermissionDenied' response.
+*)
 HandleWrite(n) ==
     /\ streams[n] = Open
     /\ HasRequest(n, WriteRequest)
@@ -384,7 +470,7 @@ HandleWrite(n) ==
        IN
            \/ /\ elections[n] = m.election_id
               /\ Master(elections) = n
-              /\ writes' = Append(writes, [node |-> n, term |-> m.term])
+              /\ history' = Append(history, [node |-> n, term |-> m.term])
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> Ok])
@@ -393,15 +479,19 @@ HandleWrite(n) ==
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> PermissionDenied])
-              /\ UNCHANGED <<writes>>
+              /\ UNCHANGED <<history>>
     /\ DiscardRequest(n)
     /\ UNCHANGED <<mastershipVars, nodeVars, elections, streamVars>>
 
 ----
 
-\* The invariant asserts that no master can write to the switch after the switch
-\* has been notified of a newer master
-TypeInvariant == \A i \in DOMAIN writes : i = 1 \/ writes[i-1].term <= writes[i].term
+(*
+The invariant asserts that the device will not allow a write from an older master
+if it has already accepted a write from a newer master. This is determined by
+comparing the mastership terms of accepted writes. For this invariant to hold,
+terms may only increase in the history of writes.
+*)
+TypeInvariant == \A i \in DOMAIN history : i = 1 \/ history[i-1].term <= history[i].term
 
 ----
 
@@ -419,7 +509,7 @@ Init ==
     /\ mastershipChanges = 0
     /\ streamChanges = 0
     /\ messageCount = 0
-    /\ writes = <<>>
+    /\ history = <<>>
 
 Next == 
     \/ \E n \in Nodes : ConnectStream(n)
@@ -438,5 +528,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Feb 18 22:56:25 PST 2019 by jordanhalterman
+\* Last modified Tue Feb 19 00:41:21 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman
