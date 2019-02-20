@@ -132,7 +132,7 @@ changes independently of the state change in the consensus service.
 *)
 
 
-\* Adds a node to the mastership election
+\* Node 'n' joins the mastership election
 (*
 If the current 'master' is Nil, set the master to node 'n', increment the 'term',
 and send a mastership change event to each node.
@@ -159,7 +159,7 @@ JoinMastershipElection(n) ==
     /\ mastershipChanges' = mastershipChanges + 1
     /\ UNCHANGED <<masterships, isMaster, streamVars, messageVars, deviceVars>>
 
-\* Removes a node from the mastership election
+\* Node 'n' leaves the mastership election
 (*
 If node 'n' is the current 'master' and a backup exists, increment the 'term',
 promote the first backup to master, and send a mastership change event to each node.
@@ -186,19 +186,6 @@ LeaveMastershipElection(n) ==
     /\ mastershipChanges' = mastershipChanges + 1
     /\ UNCHANGED <<masterships, isMaster, streamVars, messageVars, deviceVars>>
 
-\* Sets the current master to node 'n' if it's not already set
-SetMastership(n) ==
-    \/ /\ master = n
-       /\ UNCHANGED <<mastershipVars>>
-    \/ /\ master # n
-       /\ term' = term + 1
-       /\ master' = n
-       /\ \/ /\ n \in Range(backups)
-             /\ backups' = Drop(backups, CHOOSE j \in DOMAIN backups : backups[j] = n)
-          \/ /\ n \notin Range(backups)
-             /\ UNCHANGED <<backups>>
-       /\ mastershipChanges' = mastershipChanges + 1
-
 ----
 
 (*
@@ -208,7 +195,16 @@ arbitration requests to the device. Additionally, master nodes can send write
 requests to the device.
 *)
 
-\* Receives a mastership change event from the consensus layer on node 'n'
+\* Returns master node 'n' election_id for mastership term 'm'
+MasterElectionId(m) == m.term + Cardinality(Nodes)
+
+\* Returns backup node 'n' election_id for mastership term 'm'
+BackupElectionId(n, m) == m.term + Cardinality(Nodes) - CHOOSE i \in DOMAIN m.backups : m.backups[i] = n
+
+\* Returns the mastership term for MasterArbitrationUpdate 'm'
+MasterTerm(m) == m.election_id - Cardinality(Nodes)
+
+\* Node 'n' receives a mastership change event from the mastership service
 (*
 When a mastership change event is received, the node's local mastership state
 is updated. If the mastership term has changed, the node will set a flag to
@@ -234,7 +230,7 @@ LearnMastership(n) ==
     /\ events' = [events EXCEPT ![n] = Pop(events[n])]
     /\ UNCHANGED <<mastershipVars, isMaster, streamVars, messageVars, deviceVars>>
 
-\* Notifies the device of node 'n' mastership info if it hasn't already been sent
+\* Node 'n' sends a MasterArbitrationUpdate to the device
 (*
 If the node has an open stream to the device and a valid mastership state,
 a MasterArbitrationUpdate is sent to the device. If the node is a backup, the
@@ -246,7 +242,7 @@ Note that the actual protocol requires a (device_id, role_id, election_id) tuple
 only within a single (device_id, role_id) and thus they're irrelevant to correctness.
 The mastership term is sent in MasterArbitrationUpdate requests for model checking.
 *)
-SendMasterArbitrationUpdateRequest(n) ==
+SendMasterArbitrationUpdate(n) ==
     /\ streams[n] = Open
     /\ LET m == masterships[n]
        IN
@@ -255,44 +251,50 @@ SendMasterArbitrationUpdateRequest(n) ==
            /\ \/ /\ m.master = n
                  /\ SendRequest(n, [
                         type        |-> MasterArbitrationUpdate,
-                        election_id |-> m.term + Cardinality(Nodes),
+                        election_id |-> MasterElectionId(m),
                         term        |-> m.term])
               \/ /\ m.master # n
                  /\ n \in Range(m.backups)
                  /\ SendRequest(n, [
                         type        |-> MasterArbitrationUpdate,
-                        election_id |-> m.term + Cardinality(Nodes) - CHOOSE i \in DOMAIN m.backups : m.backups[i] = n,
+                        election_id |-> BackupElectionId(n, m),
                         term        |-> m.term])
     /\ masterships' = [masterships EXCEPT ![n].sent = TRUE]
     /\ UNCHANGED <<mastershipVars, events, isMaster, deviceVars, streamVars, responses>>
 
-\* Receives a master arbitration update response on node 'n'
+\* Node 'n' receives a MasterArbitrationUpdate from the device
 (*
 If the node has an open stream with a MasterArbitrationUpdate, determine whether
-the local node is the master. If the MasterArbitrationUpdate 'status' is Ok,
-update the node's state to master. Otherwise, the AlreadyExists 'status' indicates
-the device does not consider this node the master.
+the local node is the master. If the MasterArbitrationUpdate 'status' is Ok, the
+'election_id' matches the last requested mastership term, and 'n' is the master
+for that term, update the node's state to master. Otherwise, the mastership request
+is considered out of date.
+
 Note that the separate 'isMaster' state is maintained to indicate whether the
 *device* considers this node to be the current master, and this is necessary for
-the safety of the algorithm. Both the mastership service and the device must agree
-on the mastership status of the node.
+the safety of the algorithm. Both the node and the device must agree on the
+role of the node.
 *)
-ReceiveMasterArbitrationUpdateResponse(n) ==
+ReceiveMasterArbitrationUpdate(n) ==
     /\ streams[n] = Open
     /\ HasResponse(n, MasterArbitrationUpdate)
-    /\ LET m == NextResponse(n)
+    /\ LET r == NextResponse(n)
+           m == masterships[n]
        IN
-           \* TODO: Check that the returned election_id matches the current mastership term
-           \/ /\ m.status = Ok
+           \/ /\ r.status = Ok
+              /\ m.master = n
+              /\ m.term = MasterTerm(r)
+              /\ m.sent
               /\ isMaster' = [isMaster EXCEPT ![n] = TRUE]
-              /\ SetMastership(n)
-           \/ /\ m.status = AlreadyExists
+           \/ /\ \/ r.status # Ok
+                 \/ m.master # n
+                 \/ ~m.sent
+                 \/ m.term # MasterTerm(r)
               /\ isMaster' = [isMaster EXCEPT ![n] = FALSE]
-              /\ UNCHANGED <<mastershipVars>>
     /\ DiscardResponse(n)
-    /\ UNCHANGED <<events, masterships, deviceVars, streamVars, requests, messageCount>>
+    /\ UNCHANGED <<events, masterships, mastershipVars, deviceVars, streamVars, requests, messageCount>>
 
-\* Sends a write request to the device from node 'n'
+\* Master node 'n' sends a WriteRequest to the device
 (*
 To write to the device, the node must have an open stream, must have received a
 mastership change event from the mastership service (stored in 'masterships')
@@ -310,11 +312,11 @@ SendWriteRequest(n) ==
            /\ isMaster[n]
            /\ SendRequest(n, [
                   type        |-> WriteRequest,
-                  election_id |-> m.term + Cardinality(Nodes),
+                  election_id |-> MasterElectionId(m),
                   term        |-> m.term])
     /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, streamVars, responses>>
 
-\* Receives a write response on node 'n'
+\* Node 'n' receives a write response from the device
 ReceiveWriteResponse(n) ==
     /\ streams[n] = Open
     /\ HasResponse(n, WriteResponse)
@@ -337,12 +339,12 @@ will only allow writes from the current master node.
 *)
 
 \* Returns the highest election ID for the given elections
-ElectionId(e) == Max(Range(e))
+DeviceElectionId(e) == Max(Range(e))
 
 \* Returns the master for the given elections
-Master(e) == 
+DeviceMaster(e) == 
     IF Cardinality({i \in Range(e) : i > 0}) > 0 THEN
-        CHOOSE n \in DOMAIN e : e[n] = ElectionId(e)
+        CHOOSE n \in DOMAIN e : e[n] = DeviceElectionId(e)
     ELSE
         Nil
 
@@ -372,8 +374,8 @@ CloseStream(n) ==
     /\ elections' = [elections EXCEPT ![n] = 0]
     /\ streams' = [streams EXCEPT ![n] = Closed]
     /\ requests' = [requests EXCEPT ![n] = <<>>]
-    /\ LET oldMaster == Master(elections)
-           newMaster == Master(elections')
+    /\ LET oldMaster == DeviceMaster(elections)
+           newMaster == DeviceMaster(elections')
        IN
            \/ /\ oldMaster # newMaster
               /\ responses' = [i \in DOMAIN streams' |->
@@ -382,12 +384,12 @@ CloseStream(n) ==
                                           Append(responses[i], [
                                               type        |-> MasterArbitrationUpdate,
                                               status      |-> Ok,
-                                              election_id |-> ElectionId(elections')])
+                                              election_id |-> DeviceElectionId(elections')])
                                       ELSE
                                           Append(responses[i], [
                                               type        |-> MasterArbitrationUpdate,
                                               status      |-> AlreadyExists,
-                                              election_id |-> ElectionId(elections')])
+                                              election_id |-> DeviceElectionId(elections')])
                                   ELSE
                                       <<>>]
               /\ messageCount' = messageCount + 1
@@ -397,7 +399,7 @@ CloseStream(n) ==
     /\ streamChanges' = streamChanges + 1
     /\ UNCHANGED <<mastershipVars, nodeVars, history>>
 
-\* Handles a MasterArbitrationUpdate message sent from node 'n' to the device
+\* The device receives and responds to a MasterArbitrationUpdate from node 'n'
 (*
 If the 'election_id' is already present in the 'elections' and does not
 already belong to node 'n', the stream is Closed and 'requests' and 'responses'
@@ -423,8 +425,8 @@ HandleMasterArbitrationUpdate(n) ==
               /\ UNCHANGED <<deviceVars, streamChanges, messageCount>>
            \/ /\ m.election_id \notin Range(elections)
               /\ elections' = [elections EXCEPT ![n] = m.election_id]
-              /\ LET oldMaster == Master(elections)
-                     newMaster == Master(elections')
+              /\ LET oldMaster == DeviceMaster(elections)
+                     newMaster == DeviceMaster(elections')
                  IN
                      \/ /\ oldMaster # newMaster
                         /\ responses' = [i \in DOMAIN streams |->
@@ -433,12 +435,12 @@ HandleMasterArbitrationUpdate(n) ==
                                                     Append(responses[i], [
                                                         type        |-> MasterArbitrationUpdate,
                                                         status      |-> Ok,
-                                                        election_id |-> ElectionId(elections')])
+                                                        election_id |-> DeviceElectionId(elections')])
                                                 ELSE
                                                     Append(responses[i], [
                                                         type        |-> MasterArbitrationUpdate,
                                                         status      |-> AlreadyExists,
-                                                        election_id |-> ElectionId(elections')])
+                                                        election_id |-> DeviceElectionId(elections')])
                                             ELSE
                                                 responses[i]]
                         /\ messageCount' = messageCount + 1
@@ -447,17 +449,17 @@ HandleMasterArbitrationUpdate(n) ==
                               /\ SendResponse(n, [
                                      type        |-> MasterArbitrationUpdate,
                                      status      |-> Ok,
-                                     election_id |-> ElectionId(elections')])
+                                     election_id |-> DeviceElectionId(elections')])
                            \/ /\ n # newMaster
                               /\ SendResponse(n, [
                                      type        |-> MasterArbitrationUpdate,
                                      status      |-> AlreadyExists,
-                                     election_id |-> ElectionId(elections')])
+                                     election_id |-> DeviceElectionId(elections')])
               /\ UNCHANGED <<streamVars>>
     /\ DiscardRequest(n)
     /\ UNCHANGED <<mastershipVars, nodeVars, history>>
 
-\* Handles a write request on the device
+\* The device receives a WriteRequest from node 'n'
 (*
 If the WriteRequest 'election_id' matches the 'election_id' recorded on the device
 for node 'n' and the node is the current master for the device, accept the write
@@ -469,13 +471,13 @@ HandleWrite(n) ==
     /\ LET m == NextRequest(n)
        IN
            \/ /\ elections[n] = m.election_id
-              /\ Master(elections) = n
+              /\ DeviceMaster(elections) = n
               /\ history' = Append(history, [node |-> n, term |-> m.term])
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> Ok])
            \/ /\ \/ elections[n] # m.election_id
-                 \/ Master(elections) # n
+                 \/ DeviceMaster(elections) # n
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> PermissionDenied])
@@ -500,7 +502,7 @@ Init ==
     /\ master = Nil
     /\ backups = <<>>
     /\ events = [n \in Nodes |-> <<>>]
-    /\ masterships = [n \in Nodes |-> [term |-> 0, master |-> 0, backups |-> <<>>, sent |-> FALSE]]
+    /\ masterships = [n \in Nodes |-> [term |-> 0, master |-> Nil, backups |-> <<>>, sent |-> FALSE]]
     /\ isMaster = [n \in Nodes |-> FALSE]
     /\ streams = [n \in Nodes |-> Closed]
     /\ requests = [n \in Nodes |-> <<>>]
@@ -517,9 +519,9 @@ Next ==
     \/ \E n \in Nodes : JoinMastershipElection(n)
     \/ \E n \in Nodes : LeaveMastershipElection(n)
     \/ \E n \in Nodes : LearnMastership(n)
-    \/ \E n \in Nodes : SendMasterArbitrationUpdateRequest(n)
+    \/ \E n \in Nodes : SendMasterArbitrationUpdate(n)
     \/ \E n \in Nodes : HandleMasterArbitrationUpdate(n)
-    \/ \E n \in Nodes : ReceiveMasterArbitrationUpdateResponse(n)
+    \/ \E n \in Nodes : ReceiveMasterArbitrationUpdate(n)
     \/ \E n \in Nodes : SendWriteRequest(n)
     \/ \E n \in Nodes : HandleWrite(n)
     \/ \E n \in Nodes : ReceiveWriteResponse(n)
@@ -528,5 +530,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Tue Feb 19 00:41:21 PST 2019 by jordanhalterman
+\* Last modified Tue Feb 19 17:59:56 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman
