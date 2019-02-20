@@ -121,6 +121,12 @@ NextResponse(n) == responses[n][1]
 \* Discards the response at the head of the queue for node 'n'
 DiscardResponse(n) == responses' = [responses EXCEPT ![n] = Pop(responses[n])]
 
+\* Indicates whether the stream for node 'n' is Open
+IsStreamOpen(n) == streams[n].state = Open
+
+\* Indicates whether the stream for node 'n' is Closed
+IsStreamClosed(n) == streams[n].state = Closed
+
 ----
 
 (*
@@ -219,14 +225,12 @@ LearnMastership(n) ==
               /\ masterships' = [masterships EXCEPT ![n] = [
                                      term    |-> e.term,
                                      master  |-> e.master,
-                                     backups |-> e.backups,
-                                     sent    |-> FALSE]]
+                                     backups |-> e.backups]]
            \/ /\ e.term = m.term
               /\ masterships' = [masterships EXCEPT ![n] = [
                                      term    |-> e.term,
                                      master  |-> e.master,
-                                     backups |-> e.backups,
-                                     sent    |-> m.sent]]
+                                     backups |-> e.backups]]
     /\ events' = [events EXCEPT ![n] = Pop(events[n])]
     /\ UNCHANGED <<mastershipVars, isMaster, streamVars, messageVars, deviceVars>>
 
@@ -243,11 +247,12 @@ only within a single (device_id, role_id) and thus they're irrelevant to correct
 The mastership term is sent in MasterArbitrationUpdate requests for model checking.
 *)
 SendMasterArbitrationUpdate(n) ==
-    /\ streams[n] = Open
+    /\ IsStreamOpen(n)
     /\ LET m == masterships[n]
+           s == streams[n]
        IN
            /\ m.term > 0
-           /\ ~m.sent
+           /\ s.term < m.term
            /\ \/ /\ m.master = n
                  /\ SendRequest(n, [
                         type        |-> MasterArbitrationUpdate,
@@ -259,8 +264,8 @@ SendMasterArbitrationUpdate(n) ==
                         type        |-> MasterArbitrationUpdate,
                         election_id |-> BackupElectionId(n, m),
                         term        |-> m.term])
-    /\ masterships' = [masterships EXCEPT ![n].sent = TRUE]
-    /\ UNCHANGED <<mastershipVars, events, isMaster, deviceVars, streamVars, responses>>
+           /\ streams' = [streams EXCEPT ![n].term = m.term]
+    /\ UNCHANGED <<mastershipVars, events, masterships, isMaster, deviceVars, streamChanges, responses>>
 
 \* Node 'n' receives a MasterArbitrationUpdate from the device
 (*
@@ -276,19 +281,20 @@ the safety of the algorithm. Both the node and the device must agree on the
 role of the node.
 *)
 ReceiveMasterArbitrationUpdate(n) ==
-    /\ streams[n] = Open
+    /\ IsStreamOpen(n)
     /\ HasResponse(n, MasterArbitrationUpdate)
     /\ LET r == NextResponse(n)
            m == masterships[n]
+           s == streams[n]
        IN
            \/ /\ r.status = Ok
               /\ m.master = n
               /\ m.term = MasterTerm(r)
-              /\ m.sent
+              /\ s.term = m.term
               /\ isMaster' = [isMaster EXCEPT ![n] = TRUE]
            \/ /\ \/ r.status # Ok
                  \/ m.master # n
-                 \/ ~m.sent
+                 \/ s.term # m.term
                  \/ m.term # MasterTerm(r)
               /\ isMaster' = [isMaster EXCEPT ![n] = FALSE]
     /\ DiscardResponse(n)
@@ -304,7 +310,7 @@ term as was indicated by the mastership service.
 The term is sent with the WriteRequest for model checking.
 *)
 SendWriteRequest(n) ==
-    /\ streams[n] = Open
+    /\ IsStreamOpen(n)
     /\ LET m == masterships[n]
        IN
            /\ m.term > 0
@@ -318,7 +324,7 @@ SendWriteRequest(n) ==
 
 \* Node 'n' receives a write response from the device
 ReceiveWriteResponse(n) ==
-    /\ streams[n] = Open
+    /\ IsStreamOpen(n)
     /\ HasResponse(n, WriteResponse)
     /\ LET m == NextResponse(n)
        IN
@@ -354,8 +360,8 @@ When a stream is opened, the 'streams' state for node 'n' is set to Open.
 Stream creation is modelled as a single step to reduce the state space.
 *)
 ConnectStream(n) ==
-    /\ streams[n] = Closed
-    /\ streams' = [streams EXCEPT ![n] = Open]
+    /\ IsStreamClosed(n)
+    /\ streams' = [streams EXCEPT ![n].state = Open]
     /\ streamChanges' = streamChanges + 1
     /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, messageVars>>
 
@@ -370,16 +376,16 @@ in the Open state. The MasterArbitrationUpdate will be sent to the new master
 with a 'status' of Ok and to all slaves with a 'status' of AlreadyExists.
 *)
 CloseStream(n) ==
-    /\ streams[n] = Open
+    /\ IsStreamOpen(n)
     /\ elections' = [elections EXCEPT ![n] = 0]
-    /\ streams' = [streams EXCEPT ![n] = Closed]
+    /\ streams' = [streams EXCEPT ![n] = [state |-> Closed, term |-> 0]]
     /\ requests' = [requests EXCEPT ![n] = <<>>]
     /\ LET oldMaster == DeviceMaster(elections)
            newMaster == DeviceMaster(elections')
        IN
            \/ /\ oldMaster # newMaster
               /\ responses' = [i \in DOMAIN streams' |->
-                                  IF streams'[i] = Open THEN
+                                  IF streams'[i].state = Open THEN
                                       IF i = newMaster THEN
                                           Append(responses[i], [
                                               type        |-> MasterArbitrationUpdate,
@@ -413,13 +419,13 @@ MasterArbitrationUpdate response with 'status' of Ok, and slaves will always
 receive a 'status' of AlreadyExists.
 *)
 HandleMasterArbitrationUpdate(n) ==
-    /\ streams[n] = Open
+    /\ IsStreamOpen(n)
     /\ HasRequest(n, MasterArbitrationUpdate)
     /\ LET m == NextRequest(n)
        IN
            \/ /\ m.election_id \in Range(elections)
               /\ elections[n] # m.election_id
-              /\ streams' = [streams EXCEPT ![n] = Closed]
+              /\ streams' = [streams EXCEPT ![n] = [state |-> Closed, term |-> 0]]
               /\ requests' = [requests EXCEPT ![n] = <<>>]
               /\ responses' = [responses EXCEPT ![n] = <<>>]
               /\ UNCHANGED <<deviceVars, streamChanges, messageCount>>
@@ -430,7 +436,7 @@ HandleMasterArbitrationUpdate(n) ==
                  IN
                      \/ /\ oldMaster # newMaster
                         /\ responses' = [i \in DOMAIN streams |->
-                                            IF streams[i] = Open THEN
+                                            IF streams[i].state = Open THEN
                                                 IF i = newMaster THEN
                                                     Append(responses[i], [
                                                         type        |-> MasterArbitrationUpdate,
@@ -466,7 +472,7 @@ for node 'n' and the node is the current master for the device, accept the write
 and record the term for model checking. Otherwise, return a 'PermissionDenied' response.
 *)
 HandleWrite(n) ==
-    /\ streams[n] = Open
+    /\ IsStreamOpen(n)
     /\ HasRequest(n, WriteRequest)
     /\ LET m == NextRequest(n)
        IN
@@ -502,9 +508,9 @@ Init ==
     /\ master = Nil
     /\ backups = <<>>
     /\ events = [n \in Nodes |-> <<>>]
-    /\ masterships = [n \in Nodes |-> [term |-> 0, master |-> Nil, backups |-> <<>>, sent |-> FALSE]]
+    /\ masterships = [n \in Nodes |-> [term |-> 0, master |-> Nil, backups |-> <<>>]]
     /\ isMaster = [n \in Nodes |-> FALSE]
-    /\ streams = [n \in Nodes |-> Closed]
+    /\ streams = [n \in Nodes |-> [state |-> Closed, term |-> 0]]
     /\ requests = [n \in Nodes |-> <<>>]
     /\ responses = [n \in Nodes |-> <<>>]
     /\ elections = [n \in Nodes |-> 0]
@@ -530,5 +536,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Tue Feb 19 17:59:56 PST 2019 by jordanhalterman
+\* Last modified Tue Feb 19 18:26:55 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman
