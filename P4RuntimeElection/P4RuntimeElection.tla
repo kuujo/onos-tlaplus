@@ -29,8 +29,14 @@ VARIABLE events
 \* The current mastership state for each node
 VARIABLE masterships
 
-\* The state of all streams and their requests and responses
-VARIABLE streams, requests, responses
+\* Node-side stream states
+VARIABLE nodeStreams
+
+\* Device-side stream states
+VARIABLE deviceStreams
+
+\* Stream requests and responses
+VARIABLE requests, responses
 
 \* The current set of elections for the switch, the greatest of which is the current master
 VARIABLE elections
@@ -41,22 +47,25 @@ VARIABLES mastershipChanges, streamChanges, messageCount
 \* A sequence of successful writes to the switch used for model checking
 VARIABLE writes
 
+\* A counter used for setting stream IDs
+VARIABLE streamId
+
 ----
 
 \* Mastership/consensus related variables
 mastershipVars == <<term, master, backups, mastershipChanges>>
 
 \* Node related variables
-nodeVars == <<events, masterships>>
+nodeVars == <<events, masterships, nodeStreams>>
 
 \* Stream related variables
-streamVars == <<streams, streamChanges>>
+streamVars == <<nodeStreams, deviceStreams, streamChanges, streamId>>
 
 \* Message related variables
 messageVars == <<requests, responses, messageCount>>
 
 \* Device related variables
-deviceVars == <<elections, writes>>
+deviceVars == <<elections, deviceStreams, writes>>
 
 \* A sequence of all variables
 vars == <<mastershipVars, nodeVars, streamVars, messageVars, deviceVars>>
@@ -128,6 +137,23 @@ in which they occur, and nodes will always learn of a mastership change. This, o
 is not representative of practice but is sufficient for modelling the mastership election
 algorithm.
 *)
+
+\* Opens a new stream on the controller side
+OpenStream(n) ==
+    /\ nodeStreams[n].state = Closed
+    /\ streamId' = streamId + 1
+    /\ nodeStreams' = [nodeStreams EXCEPT ![n] = [id |-> streamId', state |-> Open]]
+    /\ requests' = [requests EXCEPT ![n] = <<>>]
+    /\ responses' = [responses EXCEPT ![n] = <<>>]
+    /\ streamChanges' = streamChanges + 1
+    /\ UNCHANGED <<mastershipVars, events, masterships, deviceVars, messageCount>>
+
+\* Closes an open stream on the controller side
+CloseStream(n) ==
+    /\ nodeStreams[n].state = Open
+    /\ nodeStreams' = [nodeStreams EXCEPT ![n].state = Closed]
+    /\ streamChanges' = streamChanges + 1
+    /\ UNCHANGED <<mastershipVars, events, masterships, deviceVars, messageVars, streamId>>
 
 \* Adds a node to the mastership election
 JoinMastershipElection(n) ==
@@ -207,7 +233,7 @@ LearnMastership(n) ==
 
 \* Notifies the device of node 'n' mastership info if it hasn't already been sent
 SendMasterArbitrationUpdateRequest(n) ==
-    /\ streams[n] = Open
+    /\ nodeStreams[n].state = Open
     /\ LET m == masterships[n]
        IN
            /\ m.term > 0
@@ -228,7 +254,7 @@ SendMasterArbitrationUpdateRequest(n) ==
 
 \* Receives a master arbitration update response on node 'n'
 ReceiveMasterArbitrationUpdateResponse(n) ==
-    /\ streams[n] = Open
+    /\ nodeStreams[n].state = Open
     /\ HasResponse(n, MasterArbitrationUpdate)
     /\ LET m == NextResponse(n)
        IN
@@ -241,7 +267,7 @@ ReceiveMasterArbitrationUpdateResponse(n) ==
 
 \* Sends a write request to the device from node 'n'
 SendWriteRequest(n) ==
-    /\ streams[n] = Open
+    /\ nodeStreams[n].state = Open
     /\ LET m == masterships[n]
        IN
            /\ m.term > 0
@@ -254,7 +280,7 @@ SendWriteRequest(n) ==
 
 \* Receives a write response on node 'n'
 ReceiveWriteResponse(n) ==
-    /\ streams[n] = Open
+    /\ nodeStreams[n].state = Open
     /\ HasResponse(n, WriteResponse)
     /\ LET m == NextResponse(n)
        IN
@@ -287,49 +313,50 @@ Master(e) ==
 \* When a new stream is opened, the 'requests' and 'responses' queues for the node are
 \* cleared and the 'streams' state is set to 'Open'.
 ConnectStream(n) ==
-    /\ streams[n] = Closed
-    /\ streams' = [streams EXCEPT ![n] = Open]
-    /\ requests' = [requests EXCEPT ![n] = <<>>]
-    /\ responses' = [responses EXCEPT ![n] = <<>>]
+    /\ nodeStreams[n].state = Open
+    /\ deviceStreams[n].id < nodeStreams[n].id
+    /\ deviceStreams[n].state = Closed
+    /\ deviceStreams' = [deviceStreams EXCEPT ![n].state = Open]
     /\ streamChanges' = streamChanges + 1
-    /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, messageCount>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, elections, writes, messageVars, streamId>>
 
 \* Closes the open stream between node 'n' and the device
 \* When the stream is closed, the 'requests' and 'responses' queues for the node are
 \* cleared and a 'MasterArbitrationUpdate' is sent to all remaining connected nodes
 \* to notify them of a mastership change if necessary.
-CloseStream(n) ==
-    /\ streams[n] = Open
+DisconnectStream(n) ==
+    /\ deviceStreams[n].state = Open
     /\ elections' = [elections EXCEPT ![n] = 0]
-    /\ streams' = [streams EXCEPT ![n] = Closed]
-    /\ requests' = [requests EXCEPT ![n] = <<>>]
+    /\ deviceStreams' = [deviceStreams EXCEPT ![n].state = Closed]
     /\ LET oldMaster == Master(elections)
            newMaster == Master(elections')
        IN
            \/ /\ oldMaster # newMaster
-              /\ responses' = [i \in DOMAIN streams' |->
-                                  IF i = newMaster THEN
-                                      Append(responses[i], [
-                                          type        |-> MasterArbitrationUpdate,
-                                          status      |-> Ok,
-                                          election_id |-> ElectionId(elections')])
+              /\ responses' = [i \in DOMAIN deviceStreams' |->
+                                  IF deviceStreams'[i].state = Open THEN
+                                      IF i = newMaster THEN
+                                          Append(responses[i], [
+                                              type        |-> MasterArbitrationUpdate,
+                                              status      |-> Ok,
+                                              election_id |-> ElectionId(elections')])
+                                      ELSE
+                                          Append(responses[i], [
+                                              type        |-> MasterArbitrationUpdate,
+                                              status      |-> AlreadyExists,
+                                              election_id |-> ElectionId(elections')])
                                   ELSE
-                                      Append(responses[i], [
-                                          type        |-> MasterArbitrationUpdate,
-                                          status      |-> AlreadyExists,
-                                          election_id |-> ElectionId(elections')])]
+                                      responses[i]]
               /\ messageCount' = messageCount + 1
            \/ /\ oldMaster = newMaster
-              /\ responses' = [responses EXCEPT ![n] = <<>>]
-              /\ UNCHANGED <<messageCount>>
+              /\ UNCHANGED <<responses, messageCount>>
     /\ streamChanges' = streamChanges + 1
-    /\ UNCHANGED <<mastershipVars, nodeVars, writes>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, requests, writes, streamId>>
 
 \* Handles a master arbitration update on the device
 \* If the election_id is already present in the 'elections', send an 'AlreadyExists'
 \* response to the node. Otherwise, 
 HandleMasterArbitrationUpdate(n) ==
-    /\ streams[n] = Open
+    /\ deviceStreams[n].state = Open
     /\ HasRequest(n, MasterArbitrationUpdate)
     /\ LET m == NextRequest(n)
        IN
@@ -345,17 +372,20 @@ HandleMasterArbitrationUpdate(n) ==
                      newMaster == Master(elections')
                  IN
                      \/ /\ oldMaster # newMaster
-                        /\ responses' = [i \in DOMAIN streams |->
-                                            IF i = newMaster THEN
-                                                Append(responses[i], [
-                                                    type        |-> MasterArbitrationUpdate,
-                                                    status      |-> Ok,
-                                                    election_id |-> ElectionId(elections')])
+                        /\ responses' = [i \in DOMAIN deviceStreams |->
+                                            IF deviceStreams[i].state = Open THEN
+                                                IF i = newMaster THEN
+                                                    Append(responses[i], [
+                                                        type        |-> MasterArbitrationUpdate,
+                                                        status      |-> Ok,
+                                                        election_id |-> ElectionId(elections')])
+                                                ELSE
+                                                    Append(responses[i], [
+                                                        type        |-> MasterArbitrationUpdate,
+                                                        status      |-> AlreadyExists,
+                                                        election_id |-> ElectionId(elections')])
                                             ELSE
-                                                Append(responses[i], [
-                                                    type        |-> MasterArbitrationUpdate,
-                                                    status      |-> AlreadyExists,
-                                                    election_id |-> ElectionId(elections')])]
+                                                responses[i]]
                         /\ messageCount' = messageCount + 1
                      \/ /\ oldMaster = newMaster
                         /\ SendResponse(n, [
@@ -367,7 +397,7 @@ HandleMasterArbitrationUpdate(n) ==
 
 \* Handles a write request on the device
 HandleWrite(n) ==
-    /\ streams[n] = Open
+    /\ deviceStreams[n].state = Open
     /\ HasRequest(n, WriteRequest)
     /\ LET m == NextRequest(n)
        IN
@@ -400,7 +430,8 @@ Init ==
     /\ backups = <<>>
     /\ events = [n \in Nodes |-> <<>>]
     /\ masterships = [n \in Nodes |-> [term |-> 0, master |-> 0, backups |-> <<>>, sent |-> FALSE]]
-    /\ streams = [n \in Nodes |-> Closed]
+    /\ nodeStreams = [n \in Nodes |-> [id |-> 0, state |-> Closed]]
+    /\ deviceStreams = [n \in Nodes |-> [id |-> 0, state |-> Closed]]
     /\ requests = [n \in Nodes |-> <<>>]
     /\ responses = [n \in Nodes |-> <<>>]
     /\ elections = [n \in Nodes |-> 0]
@@ -408,10 +439,13 @@ Init ==
     /\ streamChanges = 0
     /\ messageCount = 0
     /\ writes = <<>>
+    /\ streamId = 0
 
 Next == 
-    \/ \E n \in Nodes : ConnectStream(n)
+    \/ \E n \in Nodes : OpenStream(n)
     \/ \E n \in Nodes : CloseStream(n)
+    \/ \E n \in Nodes : ConnectStream(n)
+    \/ \E n \in Nodes : DisconnectStream(n)
     \/ \E n \in Nodes : JoinMastershipElection(n)
     \/ \E n \in Nodes : LeaveMastershipElection(n)
     \/ \E n \in Nodes : LearnMastership(n)
@@ -426,5 +460,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Feb 17 03:10:44 PST 2019 by jordanhalterman
+\* Last modified Mon Feb 18 02:05:46 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman
