@@ -17,6 +17,9 @@ CONSTANTS WriteRequest, WriteResponse
 \* Response status constants
 CONSTANTS Ok, AlreadyExists, PermissionDenied
 
+\* Device states
+CONSTANTS Running, Stopped
+
 \* Empty value
 CONSTANT Nil
 
@@ -35,6 +38,9 @@ VARIABLE isMaster
 \* The state of all streams and their requests and responses
 VARIABLE streams, requests, responses
 
+\* The current state of the device
+VARIABLE state
+
 \* The current set of elections for the device, the greatest of which is the current master
 VARIABLE elections
 
@@ -45,7 +51,7 @@ VARIABLE terms
 VARIABLE lastTerm
 
 \* Counting variables used to enforce state constraints
-VARIABLES mastershipChanges, streamChanges, messageCount
+VARIABLES mastershipChanges, streamChanges, stateChanges, messageCount
 
 \* A history of successful writes to the switch used for model checking
 VARIABLE history
@@ -65,10 +71,27 @@ streamVars == <<streams, streamChanges>>
 messageVars == <<requests, responses, messageCount>>
 
 \* Device related variables
-deviceVars == <<elections, terms, lastTerm, history>>
+deviceVars == <<state, elections, terms, lastTerm, history, stateChanges>>
+
+\* Device state related variables
+stateVars == <<state, stateChanges>>
 
 \* A sequence of all variables
 vars == <<mastershipVars, nodeVars, streamVars, messageVars, deviceVars>>
+
+----
+
+(*
+The invariant asserts that the device will not allow a write from an older master
+if it has already accepted a write from a newer master. This is determined by
+comparing the mastership terms of accepted writes. For this invariant to hold,
+terms may only increase in the history of writes.
+*)
+TypeInvariant ==
+    /\ \A x \in 1..Len(history) :
+           \A y \in x..Len(history) :
+               /\ history[x].term <= history[y].term
+               /\ history[x].term = history[y].term => history[x].node = history[y].node
 
 ----
 
@@ -126,12 +149,6 @@ NextResponse(n) == responses[n][1]
 
 \* Discards the response at the head of the queue for node 'n'
 DiscardResponse(n) == responses' = [responses EXCEPT ![n] = Pop(responses[n])]
-
-\* Indicates whether the stream for node 'n' is Open
-IsStreamOpen(n) == streams[n].state = Open
-
-\* Indicates whether the stream for node 'n' is Closed
-IsStreamClosed(n) == streams[n].state = Closed
 
 ----
 
@@ -253,7 +270,7 @@ only within a single (device_id, role_id) and thus they're irrelevant to correct
 The mastership term is sent in MasterArbitrationUpdate requests for model checking.
 *)
 SendMasterArbitrationUpdate(n) ==
-    /\ IsStreamOpen(n)
+    /\ streams[n].state = Open
     /\ LET m == masterships[n]
            s == streams[n]
        IN
@@ -287,7 +304,7 @@ the safety of the algorithm. Both the node and the device must agree on the
 role of the node.
 *)
 ReceiveMasterArbitrationUpdate(n) ==
-    /\ IsStreamOpen(n)
+    /\ streams[n].state = Open
     /\ HasResponse(n, MasterArbitrationUpdate)
     /\ LET r == NextResponse(n)
            m == masterships[n]
@@ -316,7 +333,7 @@ term as was indicated by the mastership service.
 The term is sent with the WriteRequest for model checking.
 *)
 SendWriteRequest(n) ==
-    /\ IsStreamOpen(n)
+    /\ streams[n].state = Open
     /\ LET m == masterships[n]
        IN
            /\ m.term > 0
@@ -330,7 +347,7 @@ SendWriteRequest(n) ==
 
 \* Node 'n' receives a write response from the device
 ReceiveWriteResponse(n) ==
-    /\ IsStreamOpen(n)
+    /\ streams[n].state = Open
     /\ HasResponse(n, WriteResponse)
     /\ LET m == NextResponse(n)
        IN
@@ -360,13 +377,38 @@ DeviceMaster(e) ==
     ELSE
         Nil
 
+\* Shuts down the device
+(*
+When the device is shutdown, all the volatile device and stream variables
+are set back to their initial state. The 'lastTerm' accepted by the device
+is persisted through the restart.
+*)
+Shutdown ==
+    /\ state = Running
+    /\ state' = Stopped
+    /\ streams' = [n \in Nodes |-> [state |-> Closed, term |-> 0]]
+    /\ requests' = [n \in Nodes |-> <<>>]
+    /\ responses' = [n \in Nodes |-> <<>>]
+    /\ elections' = [n \in Nodes |-> 0]
+    /\ terms' = [n \in Nodes |-> 0]
+    /\ stateChanges' = stateChanges + 1
+    /\ UNCHANGED <<mastershipVars, nodeVars, streamChanges, messageCount, lastTerm, history>>
+
+\* Starts the device
+Startup ==
+    /\ state = Stopped
+    /\ state' = Running
+    /\ stateChanges' = stateChanges + 1
+    /\ UNCHANGED <<mastershipVars, nodeVars, streamVars, messageVars, elections, terms, lastTerm, history>>
+
 \* Opens a new stream between node 'n' and the device
 (*
 When a stream is opened, the 'streams' state for node 'n' is set to Open.
 Stream creation is modelled as a single step to reduce the state space.
 *)
 ConnectStream(n) ==
-    /\ IsStreamClosed(n)
+    /\ state = Running
+    /\ streams[n].state # Open
     /\ streams' = [streams EXCEPT ![n].state = Open]
     /\ streamChanges' = streamChanges + 1
     /\ UNCHANGED <<mastershipVars, nodeVars, deviceVars, messageVars>>
@@ -382,7 +424,8 @@ in the Open state. The MasterArbitrationUpdate will be sent to the new master
 with a 'status' of Ok and to all slaves with a 'status' of AlreadyExists.
 *)
 CloseStream(n) ==
-    /\ IsStreamOpen(n)
+    /\ state = Running
+    /\ streams[n].state = Open
     /\ elections' = [elections EXCEPT ![n] = 0]
     /\ terms' = [terms EXCEPT ![n] = 0]
     /\ streams' = [streams EXCEPT ![n] = [state |-> Closed, term |-> 0]]
@@ -410,7 +453,7 @@ CloseStream(n) ==
               /\ responses' = [responses EXCEPT ![n] = <<>>]
               /\ UNCHANGED <<messageCount>>
     /\ streamChanges' = streamChanges + 1
-    /\ UNCHANGED <<mastershipVars, nodeVars, lastTerm, history>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, stateVars, lastTerm, history>>
 
 \* The device receives and responds to a MasterArbitrationUpdate from node 'n'
 (*
@@ -426,19 +469,20 @@ MasterArbitrationUpdate response with 'status' of Ok, and slaves will always
 receive a 'status' of AlreadyExists.
 *)
 HandleMasterArbitrationUpdate(n) ==
-    /\ IsStreamOpen(n)
+    /\ state = Running
+    /\ streams[n].state = Open
     /\ HasRequest(n, MasterArbitrationUpdate)
-    /\ LET m == NextRequest(n)
+    /\ LET r == NextRequest(n)
        IN
-           \/ /\ m.election_id \in Range(elections)
-              /\ elections[n] # m.election_id
+           \/ /\ r.election_id \in Range(elections)
+              /\ elections[n] # r.election_id
               /\ streams' = [streams EXCEPT ![n] = [state |-> Closed, term |-> 0]]
               /\ requests' = [requests EXCEPT ![n] = <<>>]
               /\ responses' = [responses EXCEPT ![n] = <<>>]
               /\ UNCHANGED <<deviceVars, streamChanges, messageCount>>
-           \/ /\ m.election_id \notin Range(elections)
-              /\ elections' = [elections EXCEPT ![n] = m.election_id]
-              /\ terms' = [terms EXCEPT ![n] = m.term]
+           \/ /\ r.election_id \notin Range(elections)
+              /\ elections' = [elections EXCEPT ![n] = r.election_id]
+              /\ terms' = [terms EXCEPT ![n] = r.term]
               /\ LET oldMaster == DeviceMaster(elections)
                      newMaster == DeviceMaster(elections')
                  IN
@@ -471,7 +515,7 @@ HandleMasterArbitrationUpdate(n) ==
                                      election_id |-> DeviceElectionId(elections')])
               /\ UNCHANGED <<streamVars>>
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<mastershipVars, nodeVars, lastTerm, history>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, stateVars, lastTerm, history>>
 
 \* The device receives a WriteRequest from node 'n'
 (*
@@ -485,20 +529,20 @@ the node that sent the request is recorded for model checking.
 If the WriteRequest is rejeceted, a PermissionDenied response is returned.
 *)
 HandleWrite(n) ==
-    /\ IsStreamOpen(n)
+    /\ state = Running
+    /\ streams[n].state = Open
     /\ HasRequest(n, WriteRequest)
-    /\ LET m == NextRequest(n)
+    /\ LET r == NextRequest(n)
        IN
-           \/ /\ elections[n] = m.election_id
+           \/ /\ elections[n] = r.election_id
               /\ DeviceMaster(elections) = n
-              /\ \/ terms[n] = 0
-                 \/ /\ terms[n] >= lastTerm
-                    /\ lastTerm' = terms[n]
-              /\ history' = Append(history, [node |-> n, term |-> m.term])
+              /\ terms[n] > 0 => terms[n] >= lastTerm
+              /\ lastTerm' = terms[n]
+              /\ history' = Append(history, [node |-> n, term |-> r.term])
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> Ok])
-           \/ /\ \/ elections[n] # m.election_id
+           \/ /\ \/ elections[n] # r.election_id
                  \/ DeviceMaster(elections) # n
                  \/ /\ terms[n] > 0
                     /\ terms[n] < lastTerm
@@ -507,23 +551,7 @@ HandleWrite(n) ==
                      status |-> PermissionDenied])
               /\ UNCHANGED <<lastTerm, history>>
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<mastershipVars, nodeVars, elections, terms, streamVars>>
-
-----
-
-(*
-The invariant asserts that the device will not allow a write from an older master
-if it has already accepted a write from a newer master. This is determined by
-comparing the mastership terms of accepted writes. For this invariant to hold,
-terms may only increase in the history of writes.
-*)
-TypeInvariant ==
-    /\ \A x \in 1..Len(history) :
-           \A y \in x..Len(history) :
-               history[x].term <= history[y].term
-    /\ \A x \in 1..Len(history) :
-           \A y \in x..Len(history) :
-               history[x].term = history[y].term => history[x].node = history[y].node
+    /\ UNCHANGED <<mastershipVars, nodeVars, stateVars, elections, terms, streamVars>>
 
 ----
 
@@ -539,9 +567,11 @@ Init ==
     /\ responses = [n \in Nodes |-> <<>>]
     /\ elections = [n \in Nodes |-> 0]
     /\ terms = [n \in Nodes |-> 0]
+    /\ state = Stopped
     /\ lastTerm = 0
     /\ mastershipChanges = 0
     /\ streamChanges = 0
+    /\ stateChanges = 0
     /\ messageCount = 0
     /\ history = <<>>
 
@@ -557,10 +587,12 @@ Next ==
     \/ \E n \in Nodes : SendWriteRequest(n)
     \/ \E n \in Nodes : HandleWrite(n)
     \/ \E n \in Nodes : ReceiveWriteResponse(n)
+    \/ Shutdown
+    \/ Startup
 
 Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Feb 20 17:53:13 PST 2019 by jordanhalterman
+\* Last modified Wed Feb 20 23:22:31 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman
