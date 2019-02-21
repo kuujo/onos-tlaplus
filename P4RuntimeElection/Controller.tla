@@ -14,6 +14,15 @@ VARIABLE events
 \* The current mastership state for each node
 VARIABLE mastership
 
+\* The unique stream ID counter used for correlating controller streams to device streams
+VARIABLE streamId
+
+\* Stream change counter used for enforcing state constraints
+VARIABLE streamChanges
+
+\* The highest term sent to the device for a node
+VARIABLE sentTerm
+
 \* Whether the node has received a MasterArbitrationUpdate indicating it is the current master
 VARIABLE isMaster
 
@@ -26,7 +35,7 @@ VARIABLE mastershipChanges
 mastershipVars == <<term, master, backups, mastershipChanges>>
 
 \* Node related variables
-nodeVars == <<events, mastership, isMaster>>
+nodeVars == <<events, mastership, sentTerm, streamId, streamChanges, isMaster>>
 
 ----
 
@@ -69,7 +78,7 @@ JoinMastershipElection(n) ==
                                             backups |-> backups'])]
           /\ UNCHANGED <<term, master>>
     /\ mastershipChanges' = mastershipChanges + 1
-    /\ UNCHANGED <<mastership, isMaster, streamVars, messageVars>>
+    /\ UNCHANGED <<mastership, sentTerm, isMaster, messageVars, streamId, streamChanges, streamVars>>
 
 \* Node 'n' leaves the mastership election
 (*
@@ -96,7 +105,32 @@ LeaveMastershipElection(n) ==
           /\ backups' = Drop(backups, CHOOSE j \in DOMAIN backups : backups[j] = n)
           /\ UNCHANGED <<term, master, events>>
     /\ mastershipChanges' = mastershipChanges + 1
-    /\ UNCHANGED <<mastership, isMaster, streamVars, messageVars>>
+    /\ UNCHANGED <<mastership, sentTerm, isMaster, messageVars, streamId, streamChanges, streamVars>>
+
+----
+
+(*
+This section models controller-side stream management.
+*)
+
+\* Opens a new stream on the controller side
+OpenStream(n) ==
+    /\ requestStream[n].state = Closed
+    /\ streamId' = streamId + 1
+    /\ requestStream' = [requestStream EXCEPT ![n] = [id |-> streamId', state |-> Open]]
+    /\ requests' = [requests EXCEPT ![n] = <<>>]
+    /\ responses' = [responses EXCEPT ![n] = <<>>]
+    /\ streamChanges' = streamChanges + 1
+    /\ UNCHANGED <<mastershipVars, events, mastership, sentTerm, isMaster, responseStream, messageCount>>
+
+\* Closes an open stream on the controller side
+CloseStream(n) ==
+    /\ requestStream[n].state = Open
+    /\ requestStream' = [requestStream EXCEPT ![n].state = Closed]
+    /\ sentTerm' = [sentTerm EXCEPT ![n] = 0]
+    /\ isMaster' = [isMaster EXCEPT ![n] = FALSE]
+    /\ streamChanges' = streamChanges + 1
+    /\ UNCHANGED <<mastershipVars, events, mastership, responseStream, messageVars, streamId>>
 
 ----
 
@@ -138,7 +172,7 @@ LearnMastership(n) ==
                                      master  |-> e.master,
                                      backups |-> e.backups]]
     /\ events' = [events EXCEPT ![n] = Pop(events[n])]
-    /\ UNCHANGED <<mastershipVars, isMaster, streamVars, messageVars>>
+    /\ UNCHANGED <<mastershipVars, sentTerm, isMaster, messageVars, streamId, streamChanges, streamVars>>
 
 \* Node 'n' sends a MasterArbitrationUpdate to the device
 (*
@@ -153,12 +187,11 @@ only within a single (device_id, role_id) and thus they're irrelevant to correct
 The mastership term is sent in MasterArbitrationUpdate requests for model checking.
 *)
 SendMasterArbitrationUpdate(n) ==
-    /\ stream[n].state = Open
+    /\ requestStream[n].state = Open
     /\ LET m == mastership[n]
-           s == stream[n]
        IN
            /\ m.term > 0
-           /\ s.term < m.term
+           /\ sentTerm[n] < m.term
            /\ \/ /\ m.master = n
                  /\ SendRequest(n, [
                         type        |-> MasterArbitrationUpdate,
@@ -170,8 +203,8 @@ SendMasterArbitrationUpdate(n) ==
                         type        |-> MasterArbitrationUpdate,
                         election_id |-> BackupElectionId(n, m),
                         epoch       |-> m.term])
-           /\ stream' = [stream EXCEPT ![n].term = m.term]
-    /\ UNCHANGED <<mastershipVars, events, mastership, isMaster, streamChanges, responses>>
+           /\ sentTerm' = [sentTerm EXCEPT ![n] = m.term]
+    /\ UNCHANGED <<mastershipVars, events, mastership, isMaster, streamId, streamChanges, streamVars, responses>>
 
 \* Node 'n' receives a MasterArbitrationUpdate from the device
 (*
@@ -187,24 +220,23 @@ the safety of the algorithm. Both the node and the device must agree on the
 role of the node.
 *)
 ReceiveMasterArbitrationUpdate(n) ==
-    /\ stream[n].state = Open
+    /\ requestStream[n].state = Open
     /\ HasResponse(n, MasterArbitrationUpdate)
     /\ LET r == NextResponse(n)
            m == mastership[n]
-           s == stream[n]
        IN
            \/ /\ r.status = Ok
               /\ m.master = n
               /\ m.term = MasterTerm(r)
-              /\ s.term = m.term
+              /\ sentTerm[n] = m.term
               /\ isMaster' = [isMaster EXCEPT ![n] = TRUE]
            \/ /\ \/ r.status # Ok
                  \/ m.master # n
-                 \/ s.term # m.term
+                 \/ sentTerm[n] # m.term
                  \/ m.term # MasterTerm(r)
               /\ isMaster' = [isMaster EXCEPT ![n] = FALSE]
     /\ DiscardResponse(n)
-    /\ UNCHANGED <<events, mastership, mastershipVars, streamVars, requests, messageCount>>
+    /\ UNCHANGED <<events, mastership, mastershipVars, sentTerm, requests, messageCount, streamId, streamChanges, streamVars>>
 
 \* Master node 'n' sends a WriteRequest to the device
 (*
@@ -216,7 +248,7 @@ term as was indicated by the mastership service.
 The term is sent with the WriteRequest for model checking.
 *)
 SendWriteRequest(n) ==
-    /\ stream[n].state = Open
+    /\ requestStream[n].state = Open
     /\ LET m == mastership[n]
        IN
            /\ m.term > 0
@@ -226,20 +258,20 @@ SendWriteRequest(n) ==
                   type        |-> WriteRequest,
                   election_id |-> MasterElectionId(m),
                   term        |-> m.term])
-    /\ UNCHANGED <<mastershipVars, nodeVars, streamVars, responses>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, streamChanges, streamVars, responses>>
 
 \* Node 'n' receives a write response from the device
 ReceiveWriteResponse(n) ==
-    /\ stream[n].state = Open
+    /\ requestStream[n].state = Open
     /\ HasResponse(n, WriteResponse)
     /\ LET m == NextResponse(n)
        IN
            \/ m.status = Ok
            \/ m.status = PermissionDenied
     /\ DiscardResponse(n)
-    /\ UNCHANGED <<mastershipVars, nodeVars, streamVars, requests, messageCount>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, sentTerm, streamId, streamChanges, streamVars, requests, messageCount>>
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 00:22:59 PST 2019 by jordanhalterman
+\* Last modified Thu Feb 21 13:17:16 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:08 PST 2019 by jordanhalterman

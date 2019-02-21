@@ -67,20 +67,20 @@ is persisted through the restart.
 Shutdown ==
     /\ state = Running
     /\ state' = Stopped
-    /\ stream' = [n \in DOMAIN stream |-> [state |-> Closed, term |-> 0]]
+    /\ responseStream' = [n \in DOMAIN responseStream |-> [id |-> responseStream[n].id, state |-> Closed]]
     /\ requests' = [n \in DOMAIN requests |-> <<>>]
     /\ responses' = [n \in DOMAIN responses |-> <<>>]
     /\ election' = [n \in DOMAIN election |-> 0]
     /\ epoch' = [n \in DOMAIN epoch |-> 0]
     /\ stateChanges' = stateChanges + 1
-    /\ UNCHANGED <<streamChanges, messageCount, maxEpoch, history>>
+    /\ UNCHANGED <<messageCount, maxEpoch, history, requestStream>>
 
 \* Starts the device
 Startup ==
     /\ state = Stopped
     /\ state' = Running
     /\ stateChanges' = stateChanges + 1
-    /\ UNCHANGED <<streamVars, messageVars, election, epoch, maxEpoch, history>>
+    /\ UNCHANGED <<messageVars, election, epoch, maxEpoch, history, streamVars>>
 
 \* Opens a new stream between node 'n' and the device
 (*
@@ -89,10 +89,11 @@ Stream creation is modelled as a single step to reduce the state space.
 *)
 ConnectStream(n) ==
     /\ state = Running
-    /\ stream[n].state # Open
-    /\ stream' = [stream EXCEPT ![n].state = Open]
-    /\ streamChanges' = streamChanges + 1
-    /\ UNCHANGED <<deviceVars, messageVars>>
+    /\ requestStream[n].state = Open
+    /\ responseStream[n].id < requestStream[n].id
+    /\ responseStream[n].state = Closed
+    /\ responseStream' = [responseStream EXCEPT ![n].state = Open]
+    /\ UNCHANGED <<deviceVars, messageVars, requestStream>>
 
 \* Closes an open stream between node 'n' and the device
 (*
@@ -104,19 +105,19 @@ elected and a MasterArbitrationUpdate is sent on the streams that remain
 in the Open state. The MasterArbitrationUpdate will be sent to the new master
 with a 'status' of Ok and to all slaves with a 'status' of AlreadyExists.
 *)
-CloseStream(n) ==
+DisconnectStream(n) ==
     /\ state = Running
-    /\ stream[n].state = Open
+    /\ responseStream[n].state = Open
     /\ election' = [election EXCEPT ![n] = 0]
     /\ epoch' = [epoch EXCEPT ![n] = 0]
-    /\ stream' = [stream EXCEPT ![n] = [state |-> Closed, term |-> 0]]
+    /\ responseStream' = [responseStream EXCEPT ![n].state = Closed]
     /\ requests' = [requests EXCEPT ![n] = <<>>]
     /\ LET oldMaster == MasterId(election)
            newMaster == MasterId(election')
        IN
            \/ /\ oldMaster # newMaster
-              /\ responses' = [i \in DOMAIN stream' |->
-                                  IF stream'[i].state = Open THEN
+              /\ responses' = [i \in DOMAIN responseStream' |->
+                                  IF responseStream'[i].state = Open THEN
                                       IF i = newMaster THEN
                                           Append(responses[i], [
                                               type        |-> MasterArbitrationUpdate,
@@ -133,8 +134,7 @@ CloseStream(n) ==
            \/ /\ oldMaster = newMaster
               /\ responses' = [responses EXCEPT ![n] = <<>>]
               /\ UNCHANGED <<messageCount>>
-    /\ streamChanges' = streamChanges + 1
-    /\ UNCHANGED <<stateVars, maxEpoch, history>>
+    /\ UNCHANGED <<stateVars, maxEpoch, history, requestStream>>
 
 \* The device receives and responds to a MasterArbitrationUpdate from node 'n'
 (*
@@ -151,16 +151,16 @@ receive a 'status' of AlreadyExists.
 *)
 HandleMasterArbitrationUpdate(n) ==
     /\ state = Running
-    /\ stream[n].state = Open
+    /\ responseStream[n].state = Open
     /\ HasRequest(n, MasterArbitrationUpdate)
     /\ LET r == NextRequest(n)
        IN
            \/ /\ r.election_id \in ElectionIds(election)
               /\ election[n] # r.election_id
-              /\ stream' = [stream EXCEPT ![n] = [state |-> Closed, term |-> 0]]
+              /\ responseStream' = [responseStream EXCEPT ![n].state = Closed]
               /\ requests' = [requests EXCEPT ![n] = <<>>]
               /\ responses' = [responses EXCEPT ![n] = <<>>]
-              /\ UNCHANGED <<deviceVars, streamChanges, messageCount>>
+              /\ UNCHANGED <<deviceVars, messageCount>>
            \/ /\ r.election_id \notin ElectionIds(election)
               /\ election' = [election EXCEPT ![n] = r.election_id]
               /\ epoch' = [epoch EXCEPT ![n] = r.epoch]
@@ -168,8 +168,8 @@ HandleMasterArbitrationUpdate(n) ==
                      newMaster == MasterId(election')
                  IN
                      \/ /\ oldMaster # newMaster
-                        /\ responses' = [i \in DOMAIN stream |->
-                                            IF stream[i].state = Open THEN
+                        /\ responses' = [i \in DOMAIN responseStream |->
+                                            IF responseStream[i].state = Open THEN
                                                 IF i = newMaster THEN
                                                     Append(responses[i], [
                                                         type        |-> MasterArbitrationUpdate,
@@ -194,9 +194,9 @@ HandleMasterArbitrationUpdate(n) ==
                                      type        |-> MasterArbitrationUpdate,
                                      status      |-> AlreadyExists,
                                      election_id |-> MaxElectionId(election')])
-              /\ UNCHANGED <<streamVars>>
+                     /\ UNCHANGED <<responseStream>>
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<stateVars, maxEpoch, history>>
+    /\ UNCHANGED <<stateVars, maxEpoch, history, requestStream>>
 
 \* The device receives a WriteRequest from node 'n'
 (*
@@ -211,7 +211,7 @@ If the WriteRequest is rejeceted, a PermissionDenied response is returned.
 *)
 HandleWrite(n) ==
     /\ state = Running
-    /\ stream[n].state = Open
+    /\ responseStream[n].state = Open
     /\ HasRequest(n, WriteRequest)
     /\ LET r == NextRequest(n)
        IN
@@ -236,5 +236,5 @@ HandleWrite(n) ==
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 00:22:37 PST 2019 by jordanhalterman
+\* Last modified Thu Feb 21 13:46:05 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:17 PST 2019 by jordanhalterman

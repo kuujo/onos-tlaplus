@@ -3,7 +3,7 @@
 EXTENDS Naturals, Sequences, Controller, Device
 
 \* A sequence of all variables
-vars == <<mastershipVars, nodeVars, streamVars, messageVars, deviceVars>>
+vars == <<mastershipVars, nodeVars, messageVars, streamVars, deviceVars, streamChanges>>
 
 (*
 The invariant asserts that the device will not allow a write from an older master
@@ -23,9 +23,12 @@ Init ==
     /\ backups = <<>>
     /\ events = [n \in Nodes |-> <<>>]
     /\ mastership = [n \in Nodes |-> [term |-> 0, master |-> Nil, backups |-> <<>>]]
+    /\ streamId = 0
+    /\ sentTerm = [n \in Nodes |-> 0]
     /\ isMaster = [n \in Nodes |-> FALSE]
-    /\ stream = [n \in Nodes |-> [state |-> Closed, term |-> 0]]
+    /\ requestStream = [n \in Nodes |-> [id |-> 0, state |-> Closed]]
     /\ requests = [n \in Nodes |-> <<>>]
+    /\ responseStream = [n \in Nodes |-> [id |-> 0, state |-> Closed]]
     /\ responses = [n \in Nodes |-> <<>>]
     /\ election = [n \in Nodes |-> 0]
     /\ epoch = [n \in Nodes |-> 0]
@@ -38,9 +41,13 @@ Init ==
     /\ history = <<>>
 
 Next == 
+    \/ \E n \in Nodes : OpenStream(n)
+       /\ UNCHANGED <<deviceVars>>
+    \/ \E n \in Nodes : CloseStream(n)
+       /\ UNCHANGED <<deviceVars>>
     \/ \E n \in Nodes : ConnectStream(n)
        /\ UNCHANGED <<mastershipVars, nodeVars>>
-    \/ \E n \in Nodes : CloseStream(n)
+    \/ \E n \in Nodes : DisconnectStream(n)
        /\ UNCHANGED <<mastershipVars, nodeVars>>
     \/ \E n \in Nodes : JoinMastershipElection(n)
        /\ UNCHANGED <<deviceVars>>
@@ -69,5 +76,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 00:21:06 PST 2019 by jordanhalterman
+\* Last modified Thu Feb 21 13:28:23 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman

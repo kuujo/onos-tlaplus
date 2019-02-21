@@ -18,18 +18,18 @@ CONSTANTS Ok, AlreadyExists, PermissionDenied
 CONSTANT Nil
 
 \* The state of all streams and their requests and responses
-VARIABLE stream, requests, responses
+VARIABLE requestStream, requests, responseStream, responses
 
 \* State change counters used for state constraints
-VARIABLE messageCount, streamChanges
+VARIABLE messageCount
 
 ----
 
-\* Stream related variables
-streamVars == <<stream, streamChanges>>
-
 \* Message related variables
 messageVars == <<requests, responses, messageCount>>
+
+\* Stream related variables
+streamVars == <<requestStream, responseStream>>
 
 ----
 
@@ -75,5 +75,5 @@ DiscardResponse(n) == responses' = [responses EXCEPT ![n] = Pop(responses[n])]
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 00:13:22 PST 2019 by jordanhalterman
+\* Last modified Thu Feb 21 13:20:32 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:28 PST 2019 by jordanhalterman
