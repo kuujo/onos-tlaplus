@@ -35,8 +35,14 @@ VARIABLE isMaster
 \* The state of all streams and their requests and responses
 VARIABLE streams, requests, responses
 
-\* The current set of elections for the switch, the greatest of which is the current master
+\* The current set of elections for the device, the greatest of which is the current master
 VARIABLE elections
+
+\* The current set of terms for each open stream for the device
+VARIABLE terms
+
+\* The term of the last successful write to the device
+VARIABLE lastTerm
 
 \* Counting variables used to enforce state constraints
 VARIABLES mastershipChanges, streamChanges, messageCount
@@ -59,7 +65,7 @@ streamVars == <<streams, streamChanges>>
 messageVars == <<requests, responses, messageCount>>
 
 \* Device related variables
-deviceVars == <<elections, history>>
+deviceVars == <<elections, terms, lastTerm, history>>
 
 \* A sequence of all variables
 vars == <<mastershipVars, nodeVars, streamVars, messageVars, deviceVars>>
@@ -378,6 +384,7 @@ with a 'status' of Ok and to all slaves with a 'status' of AlreadyExists.
 CloseStream(n) ==
     /\ IsStreamOpen(n)
     /\ elections' = [elections EXCEPT ![n] = 0]
+    /\ terms' = [terms EXCEPT ![n] = 0]
     /\ streams' = [streams EXCEPT ![n] = [state |-> Closed, term |-> 0]]
     /\ requests' = [requests EXCEPT ![n] = <<>>]
     /\ LET oldMaster == DeviceMaster(elections)
@@ -403,7 +410,7 @@ CloseStream(n) ==
               /\ responses' = [responses EXCEPT ![n] = <<>>]
               /\ UNCHANGED <<messageCount>>
     /\ streamChanges' = streamChanges + 1
-    /\ UNCHANGED <<mastershipVars, nodeVars, history>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, lastTerm, history>>
 
 \* The device receives and responds to a MasterArbitrationUpdate from node 'n'
 (*
@@ -431,6 +438,7 @@ HandleMasterArbitrationUpdate(n) ==
               /\ UNCHANGED <<deviceVars, streamChanges, messageCount>>
            \/ /\ m.election_id \notin Range(elections)
               /\ elections' = [elections EXCEPT ![n] = m.election_id]
+              /\ terms' = [terms EXCEPT ![n] = m.term]
               /\ LET oldMaster == DeviceMaster(elections)
                      newMaster == DeviceMaster(elections')
                  IN
@@ -463,13 +471,18 @@ HandleMasterArbitrationUpdate(n) ==
                                      election_id |-> DeviceElectionId(elections')])
               /\ UNCHANGED <<streamVars>>
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<mastershipVars, nodeVars, history>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, lastTerm, history>>
 
 \* The device receives a WriteRequest from node 'n'
 (*
-If the WriteRequest 'election_id' matches the 'election_id' recorded on the device
-for node 'n' and the node is the current master for the device, accept the write
-and record the term for model checking. Otherwise, return a 'PermissionDenied' response.
+The WriteRequest is accepted if:
+* The 'election_id' for node 'n' matches the 'election_id' for its stream
+* Node 'n' is the current master for the device
+* If node 'n' provided a 'term', the 'term' is greater than or equal to the
+  highest term received by the device
+When the WriteRequest is accepted, the 'lastTerm' is updated and the term of
+the node that sent the request is recorded for model checking.
+If the WriteRequest is rejeceted, a PermissionDenied response is returned.
 *)
 HandleWrite(n) ==
     /\ IsStreamOpen(n)
@@ -478,18 +491,23 @@ HandleWrite(n) ==
        IN
            \/ /\ elections[n] = m.election_id
               /\ DeviceMaster(elections) = n
+              /\ \/ terms[n] = 0
+                 \/ /\ terms[n] >= lastTerm
+                    /\ lastTerm' = terms[n]
               /\ history' = Append(history, [node |-> n, term |-> m.term])
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> Ok])
            \/ /\ \/ elections[n] # m.election_id
                  \/ DeviceMaster(elections) # n
+                 \/ /\ terms[n] > 0
+                    /\ terms[n] < lastTerm
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> PermissionDenied])
-              /\ UNCHANGED <<history>>
+              /\ UNCHANGED <<lastTerm, history>>
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<mastershipVars, nodeVars, elections, streamVars>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, elections, terms, streamVars>>
 
 ----
 
@@ -499,7 +517,13 @@ if it has already accepted a write from a newer master. This is determined by
 comparing the mastership terms of accepted writes. For this invariant to hold,
 terms may only increase in the history of writes.
 *)
-TypeInvariant == \A i \in DOMAIN history : i = 1 \/ history[i-1].term <= history[i].term
+TypeInvariant ==
+    /\ \A x \in 1..Len(history) :
+           \A y \in x..Len(history) :
+               history[x].term <= history[y].term
+    /\ \A x \in 1..Len(history) :
+           \A y \in x..Len(history) :
+               history[x].term = history[y].term => history[x].node = history[y].node
 
 ----
 
@@ -514,6 +538,8 @@ Init ==
     /\ requests = [n \in Nodes |-> <<>>]
     /\ responses = [n \in Nodes |-> <<>>]
     /\ elections = [n \in Nodes |-> 0]
+    /\ terms = [n \in Nodes |-> 0]
+    /\ lastTerm = 0
     /\ mastershipChanges = 0
     /\ streamChanges = 0
     /\ messageCount = 0
@@ -536,5 +562,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Tue Feb 19 18:26:55 PST 2019 by jordanhalterman
+\* Last modified Wed Feb 20 17:53:13 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman
