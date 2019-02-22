@@ -20,13 +20,10 @@ CONSTANT Nil
 \* The state of all streams and their requests and responses
 VARIABLE requestStream, requests, responseStream, responses
 
-\* State change counters used for state constraints
-VARIABLE messageCount
-
 ----
 
 \* Message related variables
-messageVars == <<requests, responses, messageCount>>
+messageVars == <<requests, responses>>
 
 \* Stream related variables
 streamVars == <<requestStream, responseStream>>
@@ -46,9 +43,7 @@ duplicated or reordered.
 Pop(q) == SubSeq(q, 2, Len(q))
 
 \* Sends request 'm' on the stream for node 'n'
-SendRequest(n, m) ==
-    /\ requests' = [requests EXCEPT ![n] = Append(requests[n], m)]
-    /\ messageCount' = messageCount + 1
+SendRequest(n, m) == requests' = [requests EXCEPT ![n] = Append(requests[n], m)]
 
 \* Indicates whether a request of type 't' is at the head of the queue for node 'n'
 HasRequest(n, t) == Len(requests[n]) > 0 /\ requests[n][1].type = t
@@ -60,9 +55,7 @@ NextRequest(n) == requests[n][1]
 DiscardRequest(n) == requests' = [requests EXCEPT ![n] = Pop(requests[n])]
 
 \* Sends response 'm' on the stream for node 'n'
-SendResponse(n, m) ==
-    /\ responses' = [responses EXCEPT ![n] = Append(responses[n], m)]
-    /\ messageCount' = messageCount + 1
+SendResponse(n, m) == responses' = [responses EXCEPT ![n] = Append(responses[n], m)]
 
 \* Indicates whether a response of type 't' is at the head of the queue for node 'n'
 HasResponse(n, t) == Len(responses[n]) > 0 /\ responses[n][1].type = t
@@ -75,5 +68,5 @@ DiscardResponse(n) == responses' = [responses EXCEPT ![n] = Pop(responses[n])]
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 13:20:32 PST 2019 by jordanhalterman
+\* Last modified Thu Feb 21 15:08:51 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:28 PST 2019 by jordanhalterman

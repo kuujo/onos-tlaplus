@@ -73,7 +73,7 @@ Shutdown ==
     /\ election' = [n \in DOMAIN election |-> 0]
     /\ epoch' = [n \in DOMAIN epoch |-> 0]
     /\ stateChanges' = stateChanges + 1
-    /\ UNCHANGED <<messageCount, maxEpoch, history, requestStream>>
+    /\ UNCHANGED <<maxEpoch, requestStream, history>>
 
 \* Starts the device
 Startup ==
@@ -130,11 +130,9 @@ DisconnectStream(n) ==
                                               election_id |-> MaxElectionId(election')])
                                   ELSE
                                       <<>>]
-              /\ messageCount' = messageCount + 1
            \/ /\ oldMaster = newMaster
               /\ responses' = [responses EXCEPT ![n] = <<>>]
-              /\ UNCHANGED <<messageCount>>
-    /\ UNCHANGED <<stateVars, maxEpoch, history, requestStream>>
+    /\ UNCHANGED <<stateVars, maxEpoch, requestStream, history>>
 
 \* The device receives and responds to a MasterArbitrationUpdate from node 'n'
 (*
@@ -160,7 +158,7 @@ HandleMasterArbitrationUpdate(n) ==
               /\ responseStream' = [responseStream EXCEPT ![n].state = Closed]
               /\ requests' = [requests EXCEPT ![n] = <<>>]
               /\ responses' = [responses EXCEPT ![n] = <<>>]
-              /\ UNCHANGED <<deviceVars, messageCount>>
+              /\ UNCHANGED <<deviceVars>>
            \/ /\ r.election_id \notin ElectionIds(election)
               /\ election' = [election EXCEPT ![n] = r.election_id]
               /\ epoch' = [epoch EXCEPT ![n] = r.epoch]
@@ -182,7 +180,6 @@ HandleMasterArbitrationUpdate(n) ==
                                                         election_id |-> MaxElectionId(election')])
                                             ELSE
                                                 responses[i]]
-                        /\ messageCount' = messageCount + 1
                      \/ /\ oldMaster = newMaster
                         /\ \/ /\ n = newMaster
                               /\ SendResponse(n, [
@@ -196,7 +193,7 @@ HandleMasterArbitrationUpdate(n) ==
                                      election_id |-> MaxElectionId(election')])
                      /\ UNCHANGED <<responseStream>>
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<stateVars, maxEpoch, history, requestStream>>
+    /\ UNCHANGED <<stateVars, maxEpoch, requestStream, history>>
 
 \* The device receives a WriteRequest from node 'n'
 (*
@@ -236,5 +233,5 @@ HandleWrite(n) ==
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 13:46:05 PST 2019 by jordanhalterman
+\* Last modified Thu Feb 21 15:10:49 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:17 PST 2019 by jordanhalterman

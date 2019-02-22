@@ -29,13 +29,22 @@ VARIABLE isMaster
 \* Mastership change count used for enforcing state constraints
 VARIABLE mastershipChanges
 
+\* A count of all attempted writes to the switch
+VARIABLE writeCount
+
 ----
 
 \* Mastership/consensus related variables
 mastershipVars == <<term, master, backups, mastershipChanges>>
 
+\* Mastership arbitration variables
+arbitrationVars == <<streamVars, streamId, streamChanges>>
+
+\* Mastership event variables
+eventVars == <<events, mastership>>
+
 \* Node related variables
-nodeVars == <<events, mastership, sentTerm, streamId, streamChanges, isMaster>>
+nodeVars == <<events, mastership, sentTerm, streamId, streamChanges, isMaster, writeCount>>
 
 ----
 
@@ -78,7 +87,7 @@ JoinMastershipElection(n) ==
                                             backups |-> backups'])]
           /\ UNCHANGED <<term, master>>
     /\ mastershipChanges' = mastershipChanges + 1
-    /\ UNCHANGED <<mastership, sentTerm, isMaster, messageVars, streamId, streamChanges, streamVars>>
+    /\ UNCHANGED <<mastership, sentTerm, isMaster, writeCount, messageVars, arbitrationVars>>
 
 \* Node 'n' leaves the mastership election
 (*
@@ -105,7 +114,7 @@ LeaveMastershipElection(n) ==
           /\ backups' = Drop(backups, CHOOSE j \in DOMAIN backups : backups[j] = n)
           /\ UNCHANGED <<term, master, events>>
     /\ mastershipChanges' = mastershipChanges + 1
-    /\ UNCHANGED <<mastership, sentTerm, isMaster, messageVars, streamId, streamChanges, streamVars>>
+    /\ UNCHANGED <<mastership, sentTerm, isMaster, writeCount, messageVars, arbitrationVars>>
 
 ----
 
@@ -121,7 +130,7 @@ OpenStream(n) ==
     /\ requests' = [requests EXCEPT ![n] = <<>>]
     /\ responses' = [responses EXCEPT ![n] = <<>>]
     /\ streamChanges' = streamChanges + 1
-    /\ UNCHANGED <<mastershipVars, events, mastership, sentTerm, isMaster, responseStream, messageCount>>
+    /\ UNCHANGED <<mastershipVars, eventVars, sentTerm, isMaster, responseStream, writeCount>>
 
 \* Closes an open stream on the controller side
 CloseStream(n) ==
@@ -130,7 +139,7 @@ CloseStream(n) ==
     /\ sentTerm' = [sentTerm EXCEPT ![n] = 0]
     /\ isMaster' = [isMaster EXCEPT ![n] = FALSE]
     /\ streamChanges' = streamChanges + 1
-    /\ UNCHANGED <<mastershipVars, events, mastership, responseStream, messageVars, streamId>>
+    /\ UNCHANGED <<mastershipVars, eventVars, responseStream, messageVars, streamId, writeCount>>
 
 ----
 
@@ -172,7 +181,7 @@ LearnMastership(n) ==
                                      master  |-> e.master,
                                      backups |-> e.backups]]
     /\ events' = [events EXCEPT ![n] = Pop(events[n])]
-    /\ UNCHANGED <<mastershipVars, sentTerm, isMaster, messageVars, streamId, streamChanges, streamVars>>
+    /\ UNCHANGED <<mastershipVars, sentTerm, isMaster, writeCount, messageVars, arbitrationVars>>
 
 \* Node 'n' sends a MasterArbitrationUpdate to the device
 (*
@@ -204,7 +213,7 @@ SendMasterArbitrationUpdate(n) ==
                         election_id |-> BackupElectionId(n, m),
                         epoch       |-> m.term])
            /\ sentTerm' = [sentTerm EXCEPT ![n] = m.term]
-    /\ UNCHANGED <<mastershipVars, events, mastership, isMaster, streamId, streamChanges, streamVars, responses>>
+    /\ UNCHANGED <<mastershipVars, eventVars, isMaster, writeCount, arbitrationVars, responses>>
 
 \* Node 'n' receives a MasterArbitrationUpdate from the device
 (*
@@ -236,7 +245,7 @@ ReceiveMasterArbitrationUpdate(n) ==
                  \/ m.term # MasterTerm(r)
               /\ isMaster' = [isMaster EXCEPT ![n] = FALSE]
     /\ DiscardResponse(n)
-    /\ UNCHANGED <<events, mastership, mastershipVars, sentTerm, requests, messageCount, streamId, streamChanges, streamVars>>
+    /\ UNCHANGED <<mastershipVars, eventVars, sentTerm, arbitrationVars, requests, writeCount>>
 
 \* Master node 'n' sends a WriteRequest to the device
 (*
@@ -254,11 +263,12 @@ SendWriteRequest(n) ==
            /\ m.term > 0
            /\ m.master = n
            /\ isMaster[n]
+           /\ writeCount' = writeCount + 1
            /\ SendRequest(n, [
                   type        |-> WriteRequest,
                   election_id |-> MasterElectionId(m),
                   term        |-> m.term])
-    /\ UNCHANGED <<mastershipVars, nodeVars, streamChanges, streamVars, responses>>
+    /\ UNCHANGED <<mastershipVars, eventVars, arbitrationVars, isMaster, sentTerm, responses>>
 
 \* Node 'n' receives a write response from the device
 ReceiveWriteResponse(n) ==
@@ -269,9 +279,9 @@ ReceiveWriteResponse(n) ==
            \/ m.status = Ok
            \/ m.status = PermissionDenied
     /\ DiscardResponse(n)
-    /\ UNCHANGED <<mastershipVars, nodeVars, sentTerm, streamId, streamChanges, streamVars, requests, messageCount>>
+    /\ UNCHANGED <<mastershipVars, nodeVars, arbitrationVars, requests>>
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 13:17:16 PST 2019 by jordanhalterman
+\* Last modified Thu Feb 21 15:19:30 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:08 PST 2019 by jordanhalterman
