@@ -89,9 +89,9 @@ Startup ==
     /\ state' = Running
     /\ UNCHANGED <<messageVars, election, epoch, maxEpoch, history, streamVars>>
 
-\* Opens a new stream between node 'n' and the device
+\* Connects a new stream between node 'n' and the device
 (*
-When a stream is opened, the 'streams' state for node 'n' is set to Open.
+When a stream is connected, the 'streams' state for node 'n' is set to Open.
 Stream creation is modelled as a single step to reduce the state space.
 *)
 ConnectStream(n) ==
@@ -102,9 +102,9 @@ ConnectStream(n) ==
     /\ responseStream' = [responseStream EXCEPT ![n].state = Open]
     /\ UNCHANGED <<deviceVars, messageVars, requestStream>>
 
-\* Closes an open stream between node 'n' and the device
+\* Disconnects an open stream between node 'n' and the device
 (*
-When a stream is closed, the 'streams' state for node 'n' is set to Closed,
+When a stream is disconnected, the 'streams' state for node 'n' is set to Closed,
 any 'election_id' provided by node 'n' is forgotten, and the 'requests'
 and 'responses' queues for the node are cleared.
 Additionally, if the stream belonged to the master node, a new master is
@@ -240,5 +240,5 @@ HandleWrite(n) ==
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 16:59:22 PST 2019 by jordanhalterman
+\* Last modified Thu Feb 21 17:04:08 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:17 PST 2019 by jordanhalterman
