@@ -68,5 +68,5 @@ DiscardResponse(n) == responses' = [responses EXCEPT ![n] = Pop(responses[n])]
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 15:08:51 PST 2019 by jordanhalterman
+\* Last modified Thu Feb 21 16:57:50 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:28 PST 2019 by jordanhalterman

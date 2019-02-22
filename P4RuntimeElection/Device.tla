@@ -29,19 +29,16 @@ VARIABLE maxEpoch
 The following variables are used for model checking.
 *)
 
-\* Device state change count used for enforcing state constraints
-VARIABLE stateChanges
-
 \* A history of successful writes to the switch used for model checking
 VARIABLE history
 
 ----
 
 \* Device related variables
-deviceVars == <<state, election, epoch, maxEpoch, history, stateChanges>>
+deviceVars == <<state, election, epoch, maxEpoch, history>>
 
 \* Device state related variables
-stateVars == <<state, stateChanges>>
+stateVars == <<state>>
 
 ----
 
@@ -84,14 +81,12 @@ Shutdown ==
     /\ responses' = [n \in DOMAIN responses |-> <<>>]
     /\ election' = [n \in DOMAIN election |-> 0]
     /\ epoch' = [n \in DOMAIN epoch |-> 0]
-    /\ stateChanges' = stateChanges + 1
     /\ UNCHANGED <<maxEpoch, requestStream, history>>
 
 \* Starts the device
 Startup ==
     /\ state = Stopped
     /\ state' = Running
-    /\ stateChanges' = stateChanges + 1
     /\ UNCHANGED <<messageVars, election, epoch, maxEpoch, history, streamVars>>
 
 \* Opens a new stream between node 'n' and the device
@@ -245,5 +240,5 @@ HandleWrite(n) ==
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 16:32:56 PST 2019 by jordanhalterman
+\* Last modified Thu Feb 21 16:59:22 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:17 PST 2019 by jordanhalterman
