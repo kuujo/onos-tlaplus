@@ -5,26 +5,52 @@ EXTENDS Naturals, FiniteSets, Sequences, Messages
 \* The set of all ONOS nodes
 CONSTANTS Nodes
 
-\* The current state of mastership elections
-VARIABLES term, master, backups
+----
 
-\* The current mastership event queue for each node
+(*
+The following variables are used by the mastership election service. These
+variables represent global atomic state.
+*)
+
+\* The current mastership term
+VARIABLE term
+
+\* The current master node ID
+VARIABLE master
+
+\* A sequence of standby nodes
+VARIABLE backups
+
+----
+
+(*
+The following variables are per-node variables used by controller nodes
+in the mastership arbitration protocol.
+*)
+
+\* A queue of events from the mastership service to the node
 VARIABLE events
 
-\* The current mastership state for each node
+\* The current term, master, and backups known to the node
 VARIABLE mastership
 
-\* The unique stream ID counter used for correlating controller streams to device streams
+\* The highest term sent to the device by the node
+VARIABLE sentTerm
+
+\* Whether the node has received a MasterArbitrationUpdate indicating it is the master
+VARIABLE isMaster
+
+----
+
+(*
+The following variables are used to enforce state constraints during model checking.
+*)
+
+\* A counter used to generate unique stream IDs
 VARIABLE streamId
 
 \* Stream change counter used for enforcing state constraints
 VARIABLE streamChanges
-
-\* The highest term sent to the device for a node
-VARIABLE sentTerm
-
-\* Whether the node has received a MasterArbitrationUpdate indicating it is the current master
-VARIABLE isMaster
 
 \* Mastership change count used for enforcing state constraints
 VARIABLE mastershipChanges
@@ -153,8 +179,11 @@ requests to the device.
 \* Returns master node 'n' election_id for mastership term 'm'
 MasterElectionId(m) == m.term + Cardinality(Nodes)
 
+\* Returns the index of node 'n' in the sequence of 'm' backups
+BackupIndex(n, m) == CHOOSE i \in DOMAIN m.backups : m.backups[i] = n
+
 \* Returns backup node 'n' election_id for mastership term 'm'
-BackupElectionId(n, m) == m.term + Cardinality(Nodes) - CHOOSE i \in DOMAIN m.backups : m.backups[i] = n
+BackupElectionId(n, m) == MasterElectionId(m) - BackupIndex(n, m)
 
 \* Returns the mastership term for MasterArbitrationUpdate 'm'
 MasterTerm(m) == m.election_id - Cardinality(Nodes)
@@ -283,5 +312,5 @@ ReceiveWriteResponse(n) ==
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 15:19:30 PST 2019 by jordanhalterman
+\* Last modified Thu Feb 21 16:26:11 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:08 PST 2019 by jordanhalterman

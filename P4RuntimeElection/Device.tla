@@ -5,17 +5,29 @@ EXTENDS Naturals, FiniteSets, Sequences, Messages
 \* Device states
 CONSTANTS Running, Stopped
 
-\* The current state of the device
+----
+
+(*
+The following variables are used by the device to track mastership.
+*)
+
+\* The current state of the device, either Running or Stopped
 VARIABLE state
 
-\* The election ID for each node
+\* A mapping of stream election IDs
 VARIABLE election
 
-\* The current epoch for each node
+\* A mapping of stream epochs
 VARIABLE epoch
 
 \* The epoch of the last successful write to the device
 VARIABLE maxEpoch
+
+----
+
+(*
+The following variables are used for model checking.
+*)
 
 \* Device state change count used for enforcing state constraints
 VARIABLE stateChanges
@@ -233,5 +245,5 @@ HandleWrite(n) ==
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 15:10:49 PST 2019 by jordanhalterman
+\* Last modified Thu Feb 21 16:32:56 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:17 PST 2019 by jordanhalterman
