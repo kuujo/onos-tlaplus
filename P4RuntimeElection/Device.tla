@@ -17,8 +17,8 @@ VARIABLE state
 \* A mapping of stream election IDs
 VARIABLE election
 
-\* The last successful write token
-VARIABLE writeToken
+\* The last successful write term
+VARIABLE writeTerm
 
 ----
 
@@ -32,7 +32,7 @@ VARIABLE history
 ----
 
 \* Device related variables
-deviceVars == <<state, election, writeToken, history>>
+deviceVars == <<state, election, writeTerm, history>>
 
 \* Device state related variables
 stateVars == <<state>>
@@ -67,7 +67,7 @@ MasterId(e) ==
 \* Shuts down the device
 (*
 When the device is shutdown, all the volatile device and stream variables
-are set back to their initial state. The 'writeToken' accepted by the device
+are set back to their initial state. The 'writeTerm' accepted by the device
 is persisted through the restart.
 *)
 Shutdown ==
@@ -77,13 +77,13 @@ Shutdown ==
     /\ requests' = [n \in DOMAIN requests |-> <<>>]
     /\ responses' = [n \in DOMAIN responses |-> <<>>]
     /\ election' = [n \in DOMAIN election |-> 0]
-    /\ UNCHANGED <<writeToken, requestStream, history>>
+    /\ UNCHANGED <<writeTerm, requestStream, history>>
 
 \* Starts the device
 Startup ==
     /\ state = Stopped
     /\ state' = Running
-    /\ UNCHANGED <<messageVars, election, writeToken, history, streamVars>>
+    /\ UNCHANGED <<messageVars, election, writeTerm, history, streamVars>>
 
 \* Connects a new stream between node 'n' and the device
 (*
@@ -134,7 +134,7 @@ DisconnectStream(n) ==
                                       <<>>]
            \/ /\ oldMaster = newMaster
               /\ responses' = [responses EXCEPT ![n] = <<>>]
-    /\ UNCHANGED <<stateVars, writeToken, requestStream, history>>
+    /\ UNCHANGED <<stateVars, writeTerm, requestStream, history>>
 
 \* The device receives and responds to a MasterArbitrationUpdate from node 'n'
 (*
@@ -194,7 +194,7 @@ HandleMasterArbitrationUpdate(n) ==
                                      election_id |-> MaxElectionId(election')])
                      /\ UNCHANGED <<responseStream>>
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<stateVars, writeToken, requestStream, history>>
+    /\ UNCHANGED <<stateVars, writeTerm, requestStream, history>>
 
 \* The device receives a WriteRequest from node 'n'
 (*
@@ -215,8 +215,8 @@ HandleWrite(n) ==
        IN
            \/ /\ election[n] = r.election_id
               /\ MasterId(election) = n
-              /\ r.token > 0 => r.token >= writeToken
-              /\ writeToken' = r.token
+              /\ r.token > 0 => r.token >= writeTerm
+              /\ writeTerm' = r.token
               /\ history' = Append(history, [node |-> n, term |-> r.term])
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
@@ -224,15 +224,15 @@ HandleWrite(n) ==
            \/ /\ \/ election[n] # r.election_id
                  \/ MasterId(election) # n
                  \/ r.token = 0
-                 \/ r.token < writeToken
+                 \/ r.token < writeTerm
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> PermissionDenied])
-              /\ UNCHANGED <<writeToken, history>>
+              /\ UNCHANGED <<writeTerm, history>>
     /\ DiscardRequest(n)
     /\ UNCHANGED <<stateVars, election, streamVars>>
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Feb 25 16:27:03 PST 2019 by jordanhalterman
+\* Last modified Tue Feb 26 13:24:20 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:17 PST 2019 by jordanhalterman
