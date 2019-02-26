@@ -214,14 +214,12 @@ SendMasterArbitrationUpdate(n) ==
            /\ \/ /\ m.master = n
                  /\ SendRequest(n, [
                         type        |-> MasterArbitrationUpdate,
-                        election_id |-> MasterElectionId(m),
-                        epoch       |-> m.term])
+                        election_id |-> MasterElectionId(m)])
               \/ /\ m.master # n
                  /\ n \in Range(m.backups)
                  /\ SendRequest(n, [
                         type        |-> MasterArbitrationUpdate,
-                        election_id |-> BackupElectionId(n, m),
-                        epoch       |-> m.term])
+                        election_id |-> BackupElectionId(n, m)])
            /\ sentTerm' = [sentTerm EXCEPT ![n] = m.term]
     /\ UNCHANGED <<mastershipVars, eventVars, isMaster, arbitrationVars, responses>>
 
@@ -263,8 +261,10 @@ To write to the device, the node must have an open stream, must have received a
 mastership change event from the mastership service (stored in 'mastership')
 indicating it is the master, and must have received a MasterArbitrationUpdate
 from the switch indicating it is the master (stored in 'isMaster') for the same
-term as was indicated by the mastership service.
-The term is sent with the WriteRequest for model checking.
+term as was indicated by the mastership service. Additionally, the node's current
+term is sent as the WriteRequest 'token' to avoid writes from a master that has
+since been superseded by a newer master. The term is sent with the WriteRequest
+for model checking.
 *)
 SendWriteRequest(n) ==
     /\ requestStream[n].state = Open
@@ -276,6 +276,7 @@ SendWriteRequest(n) ==
            /\ SendRequest(n, [
                   type        |-> WriteRequest,
                   election_id |-> MasterElectionId(m),
+                  token       |-> m.term,
                   term        |-> m.term])
     /\ UNCHANGED <<mastershipVars, eventVars, arbitrationVars, isMaster, sentTerm, responses>>
 
@@ -292,5 +293,5 @@ ReceiveWriteResponse(n) ==
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 16:58:59 PST 2019 by jordanhalterman
+\* Last modified Mon Feb 25 16:23:32 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:08 PST 2019 by jordanhalterman

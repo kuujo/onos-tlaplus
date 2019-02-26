@@ -31,8 +31,7 @@ Init ==
     /\ responseStream = [n \in Nodes |-> [id |-> 0, state |-> Closed]]
     /\ responses = [n \in Nodes |-> <<>>]
     /\ election = [n \in Nodes |-> 0]
-    /\ epoch = [n \in Nodes |-> 0]
-    /\ maxEpoch = 0
+    /\ writeToken = 0
     /\ state = Stopped
     /\ history = <<>>
 
@@ -72,5 +71,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 17:00:07 PST 2019 by jordanhalterman
+\* Last modified Mon Feb 25 16:25:03 PST 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman

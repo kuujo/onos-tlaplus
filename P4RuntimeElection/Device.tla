@@ -17,11 +17,8 @@ VARIABLE state
 \* A mapping of stream election IDs
 VARIABLE election
 
-\* A mapping of stream epochs
-VARIABLE epoch
-
-\* The epoch of the last successful write to the device
-VARIABLE maxEpoch
+\* The last successful write token
+VARIABLE writeToken
 
 ----
 
@@ -35,7 +32,7 @@ VARIABLE history
 ----
 
 \* Device related variables
-deviceVars == <<state, election, epoch, maxEpoch, history>>
+deviceVars == <<state, election, writeToken, history>>
 
 \* Device state related variables
 stateVars == <<state>>
@@ -70,7 +67,7 @@ MasterId(e) ==
 \* Shuts down the device
 (*
 When the device is shutdown, all the volatile device and stream variables
-are set back to their initial state. The 'maxEpoch' accepted by the device
+are set back to their initial state. The 'writeToken' accepted by the device
 is persisted through the restart.
 *)
 Shutdown ==
@@ -80,14 +77,13 @@ Shutdown ==
     /\ requests' = [n \in DOMAIN requests |-> <<>>]
     /\ responses' = [n \in DOMAIN responses |-> <<>>]
     /\ election' = [n \in DOMAIN election |-> 0]
-    /\ epoch' = [n \in DOMAIN epoch |-> 0]
-    /\ UNCHANGED <<maxEpoch, requestStream, history>>
+    /\ UNCHANGED <<writeToken, requestStream, history>>
 
 \* Starts the device
 Startup ==
     /\ state = Stopped
     /\ state' = Running
-    /\ UNCHANGED <<messageVars, election, epoch, maxEpoch, history, streamVars>>
+    /\ UNCHANGED <<messageVars, election, writeToken, history, streamVars>>
 
 \* Connects a new stream between node 'n' and the device
 (*
@@ -116,7 +112,6 @@ DisconnectStream(n) ==
     /\ state = Running
     /\ responseStream[n].state = Open
     /\ election' = [election EXCEPT ![n] = 0]
-    /\ epoch' = [epoch EXCEPT ![n] = 0]
     /\ responseStream' = [responseStream EXCEPT ![n].state = Closed]
     /\ requests' = [requests EXCEPT ![n] = <<>>]
     /\ LET oldMaster == MasterId(election)
@@ -139,7 +134,7 @@ DisconnectStream(n) ==
                                       <<>>]
            \/ /\ oldMaster = newMaster
               /\ responses' = [responses EXCEPT ![n] = <<>>]
-    /\ UNCHANGED <<stateVars, maxEpoch, requestStream, history>>
+    /\ UNCHANGED <<stateVars, writeToken, requestStream, history>>
 
 \* The device receives and responds to a MasterArbitrationUpdate from node 'n'
 (*
@@ -168,7 +163,6 @@ HandleMasterArbitrationUpdate(n) ==
               /\ UNCHANGED <<deviceVars>>
            \/ /\ r.election_id \notin ElectionIds(election)
               /\ election' = [election EXCEPT ![n] = r.election_id]
-              /\ epoch' = [epoch EXCEPT ![n] = r.epoch]
               /\ LET oldMaster == MasterId(election)
                      newMaster == MasterId(election')
                  IN
@@ -200,16 +194,16 @@ HandleMasterArbitrationUpdate(n) ==
                                      election_id |-> MaxElectionId(election')])
                      /\ UNCHANGED <<responseStream>>
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<stateVars, maxEpoch, requestStream, history>>
+    /\ UNCHANGED <<stateVars, writeToken, requestStream, history>>
 
 \* The device receives a WriteRequest from node 'n'
 (*
 The WriteRequest is accepted if:
 * The 'election_id' for node 'n' matches the 'election_id' for its stream
 * Node 'n' is the current master for the device
-* If node 'n' provided an 'epoch' and the 'epoch' is greater than or equal to the
-  highest epoch received by the device
-When the WriteRequest is accepted, the 'maxEpoch' is updated and the term of
+* If a 'token' is provided in the WroteRequest and the 'token' is greater than
+  or equal to the last 'writeToken' accepted by the device
+When the WriteRequest is accepted, the 'writeToken' is updated and the term of
 the node that sent the request is recorded for model checking.
 If the WriteRequest is rejeceted, a PermissionDenied response is returned.
 *)
@@ -221,24 +215,24 @@ HandleWrite(n) ==
        IN
            \/ /\ election[n] = r.election_id
               /\ MasterId(election) = n
-              /\ epoch[n] > 0 => epoch[n] >= maxEpoch
-              /\ maxEpoch' = epoch[n]
+              /\ r.token > 0 => r.token >= writeToken
+              /\ writeToken' = r.token
               /\ history' = Append(history, [node |-> n, term |-> r.term])
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> Ok])
            \/ /\ \/ election[n] # r.election_id
                  \/ MasterId(election) # n
-                 \/ /\ epoch[n] > 0
-                    /\ epoch[n] < maxEpoch
+                 \/ r.token = 0
+                 \/ r.token < writeToken
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> PermissionDenied])
-              /\ UNCHANGED <<maxEpoch, history>>
+              /\ UNCHANGED <<writeToken, history>>
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<stateVars, election, epoch, streamVars>>
+    /\ UNCHANGED <<stateVars, election, streamVars>>
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 21 17:04:08 PST 2019 by jordanhalterman
+\* Last modified Mon Feb 25 16:27:03 PST 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:17 PST 2019 by jordanhalterman
