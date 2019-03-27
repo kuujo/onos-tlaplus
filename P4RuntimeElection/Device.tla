@@ -17,9 +17,6 @@ VARIABLE state
 \* A mapping of stream election IDs
 VARIABLE election
 
-\* The last successful write term
-VARIABLE writeTerm
-
 ----
 
 (*
@@ -32,7 +29,7 @@ VARIABLE history
 ----
 
 \* Device related variables
-deviceVars == <<state, election, writeTerm, history>>
+deviceVars == <<state, election, history>>
 
 \* Device state related variables
 stateVars == <<state>>
@@ -77,13 +74,13 @@ Shutdown ==
     /\ requests' = [n \in DOMAIN requests |-> <<>>]
     /\ responses' = [n \in DOMAIN responses |-> <<>>]
     /\ election' = [n \in DOMAIN election |-> 0]
-    /\ UNCHANGED <<writeTerm, requestStream, history>>
+    /\ UNCHANGED <<requestStream, history>>
 
 \* Starts the device
 Startup ==
     /\ state = Stopped
     /\ state' = Running
-    /\ UNCHANGED <<messageVars, election, writeTerm, history, streamVars>>
+    /\ UNCHANGED <<messageVars, election, history, streamVars>>
 
 \* Connects a new stream between node 'n' and the device
 (*
@@ -134,7 +131,7 @@ DisconnectStream(n) ==
                                       <<>>]
            \/ /\ oldMaster = newMaster
               /\ responses' = [responses EXCEPT ![n] = <<>>]
-    /\ UNCHANGED <<stateVars, writeTerm, requestStream, history>>
+    /\ UNCHANGED <<stateVars, requestStream, history>>
 
 \* The device receives and responds to a MasterArbitrationUpdate from node 'n'
 (*
@@ -194,7 +191,7 @@ HandleMasterArbitrationUpdate(n) ==
                                      election_id |-> MaxElectionId(election')])
                      /\ UNCHANGED <<responseStream>>
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<stateVars, writeTerm, requestStream, history>>
+    /\ UNCHANGED <<stateVars, requestStream, history>>
 
 \* The device receives a WriteRequest from node 'n'
 (*
@@ -215,24 +212,20 @@ HandleWrite(n) ==
        IN
            \/ /\ election[n] = r.election_id
               /\ MasterId(election) = n
-              /\ r.token > 0 => r.token >= writeTerm
-              /\ writeTerm' = r.token
               /\ history' = Append(history, [node |-> n, term |-> r.term])
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> Ok])
            \/ /\ \/ election[n] # r.election_id
                  \/ MasterId(election) # n
-                 \/ r.token = 0
-                 \/ r.token < writeTerm
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> PermissionDenied])
-              /\ UNCHANGED <<writeTerm, history>>
+              /\ UNCHANGED <<history>>
     /\ DiscardRequest(n)
     /\ UNCHANGED <<stateVars, election, streamVars>>
 
 =============================================================================
 \* Modification History
-\* Last modified Tue Feb 26 13:24:20 PST 2019 by jordanhalterman
+\* Last modified Wed Mar 27 13:08:01 PDT 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:17 PST 2019 by jordanhalterman
