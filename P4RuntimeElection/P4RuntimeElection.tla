@@ -2,8 +2,6 @@
 
 EXTENDS Naturals, Sequences, Controller, Device
 
-VARIABLE step
-
 \* A sequence of all variables
 vars == <<mastershipVars, nodeVars, messageVars, streamVars, deviceVars>>
 
@@ -32,7 +30,8 @@ Init ==
     /\ requests = [n \in Nodes |-> <<>>]
     /\ responseStream = [n \in Nodes |-> [id |-> 0, state |-> Closed]]
     /\ responses = [n \in Nodes |-> <<>>]
-    /\ election = [n \in Nodes |-> 0]
+    /\ electionId = 0
+    /\ currentMaster = Nil
     /\ state = Stopped
     /\ history = <<>>
 
@@ -72,5 +71,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Mar 27 15:51:45 PDT 2019 by jordanhalterman
+\* Last modified Wed Mar 27 16:46:32 PDT 2019 by jordanhalterman
 \* Created Thu Feb 14 11:33:03 PST 2019 by jordanhalterman

@@ -14,8 +14,11 @@ The following variables are used by the device to track mastership.
 \* The current state of the device, either Running or Stopped
 VARIABLE state
 
-\* A mapping of stream election IDs
-VARIABLE election
+\* The election ID of the highest master
+VARIABLE electionId
+
+\* The current master node
+VARIABLE currentMaster
 
 ----
 
@@ -28,8 +31,11 @@ VARIABLE history
 
 ----
 
+\* Election related variables
+electionVars == <<electionId, currentMaster>>
+
 \* Device related variables
-deviceVars == <<state, election, history>>
+deviceVars == <<state, history, electionVars>>
 
 \* Device state related variables
 stateVars == <<state>>
@@ -45,22 +51,6 @@ is computed as the node with the highest 'election_id' at any given time. The de
 will only allow writes from the current master node.
 *)
 
-\* Returns the set of election IDs in the given elections
-ElectionIds(e) == {e[x] : x \in DOMAIN e}
-
-\* Returns the maximum value from a set or undefined if the set is empty
-Max(s) == CHOOSE x \in s : \A y \in s : x >= y
-
-\* Returns the highest election ID for the given elections
-MaxElectionId(e) == Max(ElectionIds(e))
-
-\* Returns the master for the given elections
-MasterId(e) ==
-    IF Cardinality({i \in ElectionIds(e) : i > 0}) > 0 THEN
-        CHOOSE n \in DOMAIN e : e[n] = MaxElectionId(e)
-    ELSE
-        Nil
-
 \* Shuts down the device
 (*
 When the device is shutdown, all the volatile device and stream variables
@@ -73,14 +63,13 @@ Shutdown ==
     /\ responseStream' = [n \in DOMAIN responseStream |-> [id |-> responseStream[n].id, state |-> Closed]]
     /\ requests' = [n \in DOMAIN requests |-> <<>>]
     /\ responses' = [n \in DOMAIN responses |-> <<>>]
-    /\ election' = [n \in DOMAIN election |-> 0]
-    /\ UNCHANGED <<requestStream, history>>
+    /\ UNCHANGED <<requestStream, electionVars, history>>
 
 \* Starts the device
 Startup ==
     /\ state = Stopped
     /\ state' = Running
-    /\ UNCHANGED <<messageVars, election, history, streamVars>>
+    /\ UNCHANGED <<messageVars, electionVars, history, streamVars>>
 
 \* Connects a new stream between node 'n' and the device
 (*
@@ -108,30 +97,10 @@ with a 'status' of Ok and to all slaves with a 'status' of AlreadyExists.
 DisconnectStream(n) ==
     /\ state = Running
     /\ responseStream[n].state = Open
-    /\ election' = [election EXCEPT ![n] = 0]
     /\ responseStream' = [responseStream EXCEPT ![n].state = Closed]
     /\ requests' = [requests EXCEPT ![n] = <<>>]
-    /\ LET oldMaster == MasterId(election)
-           newMaster == MasterId(election')
-       IN
-           \/ /\ oldMaster # newMaster
-              /\ responses' = [i \in DOMAIN responseStream' |->
-                                  IF responseStream'[i].state = Open THEN
-                                      IF i = newMaster THEN
-                                          Append(responses[i], [
-                                              type        |-> MasterArbitrationUpdate,
-                                              status      |-> Ok,
-                                              election_id |-> MaxElectionId(election')])
-                                      ELSE
-                                          Append(responses[i], [
-                                              type        |-> MasterArbitrationUpdate,
-                                              status      |-> AlreadyExists,
-                                              election_id |-> MaxElectionId(election')])
-                                  ELSE
-                                      <<>>]
-           \/ /\ oldMaster = newMaster
-              /\ responses' = [responses EXCEPT ![n] = <<>>]
-    /\ UNCHANGED <<stateVars, requestStream, history>>
+    /\ responses' = [responses EXCEPT ![n] = <<>>]
+    /\ UNCHANGED <<stateVars, requestStream, electionVars, history>>
 
 \* The device receives and responds to a MasterArbitrationUpdate from node 'n'
 (*
@@ -152,44 +121,30 @@ HandleMasterArbitrationUpdate(n) ==
     /\ HasRequest(n, MasterArbitrationUpdate)
     /\ LET r == NextRequest(n)
        IN
-           \/ /\ r.election_id \in ElectionIds(election)
-              /\ election[n] # r.election_id
+           \/ /\ r.election_id = electionId
+              /\ currentMaster # n
               /\ responseStream' = [responseStream EXCEPT ![n].state = Closed]
               /\ requests' = [requests EXCEPT ![n] = <<>>]
               /\ responses' = [responses EXCEPT ![n] = <<>>]
               /\ UNCHANGED <<deviceVars>>
-           \/ /\ r.election_id \notin ElectionIds(election)
-              /\ election' = [election EXCEPT ![n] = r.election_id]
-              /\ LET oldMaster == MasterId(election)
-                     newMaster == MasterId(election')
-                 IN
-                     \/ /\ oldMaster # newMaster
-                        /\ responses' = [i \in DOMAIN responseStream |->
-                                            IF responseStream[i].state = Open THEN
-                                                IF i = newMaster THEN
-                                                    Append(responses[i], [
-                                                        type        |-> MasterArbitrationUpdate,
-                                                        status      |-> Ok,
-                                                        election_id |-> MaxElectionId(election')])
-                                                ELSE
-                                                    Append(responses[i], [
-                                                        type        |-> MasterArbitrationUpdate,
-                                                        status      |-> AlreadyExists,
-                                                        election_id |-> MaxElectionId(election')])
-                                            ELSE
-                                                responses[i]]
-                     \/ /\ oldMaster = newMaster
-                        /\ \/ /\ n = newMaster
-                              /\ SendResponse(n, [
-                                     type        |-> MasterArbitrationUpdate,
-                                     status      |-> Ok,
-                                     election_id |-> MaxElectionId(election')])
-                           \/ /\ n # newMaster
-                              /\ SendResponse(n, [
-                                     type        |-> MasterArbitrationUpdate,
-                                     status      |-> AlreadyExists,
-                                     election_id |-> MaxElectionId(election')])
-                     /\ UNCHANGED <<responseStream>>
+           \/ /\ r.election_id > electionId
+              /\ electionId' = r.election_id
+              /\ currentMaster' = n
+              /\ responses' = [i \in DOMAIN responseStream |->
+                                  IF responseStream[i].state = Open THEN
+                                      Append(responses[i], [
+                                          type        |-> MasterArbitrationUpdate,
+                                          status      |-> Ok,
+                                          election_id |-> r.election_id])
+                                  ELSE
+                                      responses[i]]
+              /\ UNCHANGED <<responseStream>>
+           \/ /\ r.election_id < electionId
+              /\ SendResponse(n, [
+                     type        |-> MasterArbitrationUpdate,
+                     status      |-> AlreadyExists,
+                     election_id |-> electionId])
+              /\ UNCHANGED <<deviceVars, responseStream>>
     /\ DiscardRequest(n)
     /\ UNCHANGED <<stateVars, requestStream, history>>
 
@@ -210,22 +165,22 @@ HandleWrite(n) ==
     /\ HasRequest(n, WriteRequest)
     /\ LET r == NextRequest(n)
        IN
-           \/ /\ election[n] = r.election_id
-              /\ MasterId(election) = n
+           \/ /\ r.election_id = electionId
+              /\ currentMaster = n
               /\ history' = Append(history, [node |-> n, term |-> r.term])
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> Ok])
-           \/ /\ \/ election[n] # r.election_id
-                 \/ MasterId(election) # n
+           \/ /\ \/ r.election_id # electionId
+                 \/ currentMaster # n
               /\ SendResponse(n, [
                      type   |-> WriteResponse,
                      status |-> PermissionDenied])
               /\ UNCHANGED <<history>>
     /\ DiscardRequest(n)
-    /\ UNCHANGED <<stateVars, election, streamVars>>
+    /\ UNCHANGED <<stateVars, electionVars, streamVars>>
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Mar 27 13:08:01 PDT 2019 by jordanhalterman
+\* Last modified Wed Mar 27 17:45:48 PDT 2019 by jordanhalterman
 \* Created Wed Feb 20 23:49:17 PST 2019 by jordanhalterman
